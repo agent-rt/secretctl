@@ -16,21 +16,12 @@ permissions:
 env:
   PRODUCT: secretctl
   TAP_REPO: agent-rt/homebrew-tap
+  TARGET: aarch64-apple-darwin
 
 jobs:
   build:
-    name: Build & publish (${{ matrix.target }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: aarch64-apple-darwin
-            zig_target: aarch64-macos
-            os: macos-14
-          - target: x86_64-apple-darwin
-            zig_target: x86_64-macos
-            os: macos-13
+    name: Build & publish
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -53,7 +44,7 @@ jobs:
 
       - name: Build release binary
         run: |
-          zig build -Doptimize=ReleaseSafe -Dtarget=${{ matrix.zig_target }}
+          zig build -Doptimize=ReleaseSafe
           ls -la zig-out/bin/${{ env.PRODUCT }}
 
       - name: Package tarball
@@ -61,7 +52,7 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${{ steps.tag.outputs.version }}"
-          NAME="${{ env.PRODUCT }}-${VERSION}-${{ matrix.target }}"
+          NAME="${{ env.PRODUCT }}-${VERSION}-${{ env.TARGET }}"
           mkdir -p "dist/${NAME}"
           cp "zig-out/bin/${{ env.PRODUCT }}" "dist/${NAME}/"
           cp README.md LICENSE "dist/${NAME}/"
@@ -71,7 +62,6 @@ jobs:
           SHA="$(awk '{print $1}' "${NAME}.tar.gz.sha256")"
           echo "tarball=dist/${NAME}.tar.gz"        >> "$GITHUB_OUTPUT"
           echo "shafile=dist/${NAME}.tar.gz.sha256" >> "$GITHUB_OUTPUT"
-          echo "tarname=${NAME}.tar.gz"             >> "$GITHUB_OUTPUT"
           echo "sha256=${SHA}"                      >> "$GITHUB_OUTPUT"
 
       - name: Publish to project release
@@ -117,7 +107,7 @@ jobs:
           echo "version=$VERSION"                  >> "$GITHUB_OUTPUT"
           echo "rel_tag=${{ env.PRODUCT }}-${TAG}" >> "$GITHUB_OUTPUT"
 
-      - name: Download SHA256 files from tap release
+      - name: Download SHA256 file from tap release
         id: sha
         env:
           GH_TOKEN: ${{ secrets.GH_DIST_TOKEN }}
@@ -127,10 +117,8 @@ jobs:
             --repo "${{ env.TAP_REPO }}" \
             --pattern "*.sha256" \
             --dir dist
-          ARM_SHA="$(awk '{print $1}' dist/${{ env.PRODUCT }}-${VERSION}-aarch64-apple-darwin.tar.gz.sha256)"
-          X86_SHA="$(awk '{print $1}' dist/${{ env.PRODUCT }}-${VERSION}-x86_64-apple-darwin.tar.gz.sha256)"
+          ARM_SHA="$(awk '{print $1}' dist/${{ env.PRODUCT }}-${VERSION}-${{ env.TARGET }}.tar.gz.sha256)"
           echo "arm_sha=${ARM_SHA}" >> "$GITHUB_OUTPUT"
-          echo "x86_sha=${X86_SHA}" >> "$GITHUB_OUTPUT"
 
       - name: Update Homebrew formula in tap repo
         env:
@@ -140,10 +128,8 @@ jobs:
           VERSION="${{ steps.tag.outputs.version }}"
           REL_TAG="${{ steps.tag.outputs.rel_tag }}"
           ARM_SHA="${{ steps.sha.outputs.arm_sha }}"
-          X86_SHA="${{ steps.sha.outputs.x86_sha }}"
           BASE="https://github.com/${{ env.TAP_REPO }}/releases/download/${REL_TAG}"
-          ARM_URL="${BASE}/${{ env.PRODUCT }}-${VERSION}-aarch64-apple-darwin.tar.gz"
-          X86_URL="${BASE}/${{ env.PRODUCT }}-${VERSION}-x86_64-apple-darwin.tar.gz"
+          ARM_URL="${BASE}/${{ env.PRODUCT }}-${VERSION}-${{ env.TARGET }}.tar.gz"
 
           git clone "https://x-access-token:${GH_TOKEN}@github.com/${{ env.TAP_REPO }}.git" tap
           cd tap
@@ -156,14 +142,13 @@ jobs:
             version "${VERSION}"
             license "Apache-2.0"
 
+            depends_on :macos
+            depends_on arch: :arm64
+
             on_macos do
               on_arm do
                 url "${ARM_URL}"
                 sha256 "${ARM_SHA}"
-              end
-              on_intel do
-                url "${X86_URL}"
-                sha256 "${X86_SHA}"
               end
             end
 

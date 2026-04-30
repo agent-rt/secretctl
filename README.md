@@ -32,13 +32,13 @@ secretctl rm STALE_TOKEN
   useful — stronger than SOPS' field-level encryption.
 - **Zero ambient state**: no `.env` files, no shell history, no
   process arguments. CLI rejects `secretctl add NAME value`.
-- **One binary**: macOS arm64+x86_64, ~600 KB, no runtime
+- **One binary**: macOS arm64 (Apple Silicon), ~600 KB, no runtime
   dependencies (Security.framework + libc are system-provided).
 
 ## Install
 
 ```bash
-brew install agent-rt/tap/secretctl
+brew install agent-rt/tap/secretctl  # macOS arm64 (Apple Silicon) only
 ```
 
 Or download the tarball for your arch from the
