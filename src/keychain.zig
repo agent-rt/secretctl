@@ -28,6 +28,16 @@ pub const Error = error{
 
 const default_service = "secretctl";
 
+/// Magic prefix for v0.2 protector bodies. Earlier (v0.1.x) bodies started
+/// directly with service_len (u16 LE), so we sniff the first 2 bytes.
+const body_magic_v2 = "S2";
+
+/// Body flags (v0.2+).
+pub const Flags = enum(u8) {
+    default = 0x00,
+    touch_id = 0x01,
+};
+
 fn buildAad(
     allocator: std.mem.Allocator,
     master_key_id: *const [16]u8,
@@ -78,7 +88,7 @@ fn buildSelfTrustedAccess() sf.SecAccessRef {
     return access;
 }
 
-fn keychainStore(service: []const u8, account: []const u8, value: []const u8) Error!void {
+fn keychainStore(service: []const u8, account: []const u8, value: []const u8, flags: Flags) Error!void {
     const cf_service = sf.cfString(service) orelse return Error.Unexpected;
     defer sf.CFRelease(cf_service);
     const cf_account = sf.cfString(account) orelse return Error.Unexpected;
@@ -100,6 +110,10 @@ fn keychainStore(service: []const u8, account: []const u8, value: []const u8) Er
     sf.CFDictionarySetValue(dict, @ptrCast(sf.kSecValueData), @ptrCast(cf_value));
     sf.CFDictionarySetValue(dict, @ptrCast(sf.kSecAttrAccessible), @ptrCast(sf.kSecAttrAccessibleWhenUnlocked));
 
+    // Touch ID body flag is recorded for forward compatibility; the actual
+    // biometry gate is deferred to Phase 3 (LocalAuthentication.framework
+    // before fetch). For now we always use the trusted-app ACL.
+    _ = flags;
     const access_ref = buildSelfTrustedAccess();
     defer if (access_ref) |ar| sf.CFRelease(ar);
     if (access_ref) |ar| {
@@ -181,6 +195,15 @@ pub fn wrap(
     master_key: *const [aes.key_len]u8,
     master_key_id: *const [16]u8,
 ) Error!protector.Protector {
+    return wrapWithFlags(allocator, master_key, master_key_id, .default);
+}
+
+pub fn wrapWithFlags(
+    allocator: std.mem.Allocator,
+    master_key: *const [aes.key_len]u8,
+    master_key_id: *const [16]u8,
+    flags: Flags,
+) Error!protector.Protector {
     var protector_id: [16]u8 = undefined;
     rand.bytes(&protector_id);
 
@@ -203,12 +226,16 @@ pub fn wrap(
     hexAccount(master_key_id, &account_buf);
     const account = account_buf[0..];
 
-    try keychainStore(service, account, &wrap_key);
+    try keychainStore(service, account, &wrap_key, flags);
 
-    // Serialize body.
-    const body_len = 2 + service.len + 2 + account.len + 12 + 2 + ct.len + 16;
+    // Serialize body. v0.2 layout: magic "S2" | flags u8 | service_len u16 | service | account_len u16 | account | nonce[12] | ct_len u16 | ct | tag[16].
+    const body_len = body_magic_v2.len + 1 + 2 + service.len + 2 + account.len + 12 + 2 + ct.len + 16;
     var body = try allocator.alloc(u8, body_len);
     var w: usize = 0;
+    @memcpy(body[w .. w + body_magic_v2.len], body_magic_v2);
+    w += body_magic_v2.len;
+    body[w] = @intFromEnum(flags);
+    w += 1;
     std.mem.writeInt(u16, body[w..][0..2], @intCast(service.len), .little);
     w += 2;
     @memcpy(body[w .. w + service.len], service);
@@ -244,6 +271,15 @@ pub fn unwrap(
 ) Error!void {
     if (body.len < 2) return Error.MalformedBody;
     var r: usize = 0;
+    // Sniff v0.2 magic. If absent, treat as v0.1 layout (no flags byte).
+    if (body.len >= body_magic_v2.len and std.mem.eql(u8, body[0..body_magic_v2.len], body_magic_v2)) {
+        r += body_magic_v2.len;
+        if (body.len < r + 1) return Error.MalformedBody;
+        // flags byte — informational; the actual access mode is set at item
+        // creation time in Keychain. We don't need to act on it here.
+        r += 1;
+    }
+    if (body.len < r + 2) return Error.MalformedBody;
     const service_len = std.mem.readInt(u16, body[r..][0..2], .little);
     r += 2;
     if (body.len < r + service_len + 2) return Error.MalformedBody;

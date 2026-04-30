@@ -20,6 +20,7 @@ const policy_mod = @import("policy.zig");
 const audit_mod = @import("audit.zig");
 const editor_mod = @import("editor.zig");
 const envelope_mod = @import("envelope.zig");
+const mcp_mod = @import("mcp.zig");
 
 pub const ExitCode = enum(u8) {
     success = 0,
@@ -34,7 +35,7 @@ pub const usage_text =
     \\secretctl — single-binary local secret manager
     \\
     \\USAGE:
-    \\  secretctl init
+    \\  secretctl init [--touch-id]
     \\  secretctl add NAME [--tag X,Y] [--editor]
     \\  secretctl edit NAME
     \\  secretctl rm NAME
@@ -42,7 +43,8 @@ pub const usage_text =
     \\  secretctl exec [--tag X] [--only N1,N2] -- COMMAND ARGS...
     \\  secretctl render TEMPLATE --out PATH
     \\  secretctl reveal NAME
-    \\  secretctl reinstall-keychain     # rebuild keychain protector ACL
+    \\  secretctl mcp [--cwd PATH]        # MCP server over stdio
+    \\  secretctl reinstall-keychain [--touch-id]   # rebuild keychain protector
     \\
     \\ENV:
     \\  $VISUAL / $EDITOR control which editor `edit` and `add --editor` launch.
@@ -73,6 +75,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) u8 {
     if (std.mem.eql(u8, cmd, "exec")) return runExec(allocator, tail);
     if (std.mem.eql(u8, cmd, "render")) return runRender(allocator, tail);
     if (std.mem.eql(u8, cmd, "reveal")) return runReveal(allocator, tail);
+    if (std.mem.eql(u8, cmd, "mcp")) return runMcp(allocator, tail);
     if (std.mem.eql(u8, cmd, "reinstall-keychain")) return runReinstallKeychain(allocator, tail);
 
     tty.writeStderr("unknown command: ");
@@ -85,7 +88,17 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) u8 {
 // ------- init -------
 
 fn runInit(allocator: std.mem.Allocator, args: []const []const u8) u8 {
-    _ = args;
+    var touch_id = false;
+    for (args) |a| {
+        if (std.mem.eql(u8, a, "--touch-id")) {
+            touch_id = true;
+        } else {
+            tty.writeStderr("unknown init flag: ");
+            tty.writeStderr(a);
+            tty.writeStderr("\n");
+            return 2;
+        }
+    }
     var p = paths_mod.resolve(allocator) catch return errExit("cannot resolve paths");
     defer p.deinit();
 
@@ -110,7 +123,13 @@ fn runInit(allocator: std.mem.Allocator, args: []const []const u8) u8 {
     } else tty.readNewPassword(allocator, 8) catch return errExit("password input failed");
     defer pw.deinit();
 
-    const use_keychain = if (batch) false else tty.confirm("Use macOS Keychain to skip password on subsequent runs?", true) catch true;
+    // Batch mode (testing) keeps Keychain off by default so that test scripts
+    // can pass `password\nvalue\n` over stdin reliably. Tests that need
+    // Keychain (e.g. MCP smoke tests) set SECRETCTL_BATCH_KEYCHAIN=1.
+    const use_keychain = if (batch)
+        c_getenv("SECRETCTL_BATCH_KEYCHAIN") != null
+    else
+        tty.confirm("Use macOS Keychain to skip password on subsequent runs?", true) catch true;
 
     var master_key: [aes.key_len]u8 = undefined;
     rand.bytes(&master_key);
@@ -127,7 +146,8 @@ fn runInit(allocator: std.mem.Allocator, args: []const []const u8) u8 {
     protector_count += 1;
 
     if (use_keychain) {
-        const kp = keychain_mod.wrap(allocator, &master_key, &mk_id) catch |e| switch (e) {
+        const flags: keychain_mod.Flags = if (touch_id) .touch_id else .default;
+        const kp = keychain_mod.wrapWithFlags(allocator, &master_key, &mk_id, flags) catch |e| switch (e) {
             else => {
                 tty.writeStderr("warning: Keychain protector failed; continuing with passphrase only\n");
                 return finishInit(allocator, &p, &mk_id, &master_key, protectors[0..protector_count]);
@@ -135,6 +155,7 @@ fn runInit(allocator: std.mem.Allocator, args: []const []const u8) u8 {
         };
         protectors[protector_count] = kp;
         protector_count += 1;
+        if (touch_id) tty.writeStderr("--touch-id recorded; biometric gating ships in Phase 3 (LocalAuthentication).\n");
     }
 
     return finishInit(allocator, &p, &mk_id, &master_key, protectors[0..protector_count]);
@@ -164,7 +185,7 @@ fn finishInit(
 
     fsx.writeAllAtomic(p.config, "# secretctl config\n", 0o600) catch return errExit("write config failed");
 
-    audit_mod.log("init", &.{.{ .key = "home", .value = p.home }});
+    audit_mod.log("init", .cli, &.{audit_mod.s("home", p.home)});
     tty.writeStdout("vault created at ");
     tty.writeStdout(p.home);
     tty.writeStdout("\n");
@@ -389,7 +410,7 @@ fn runAdd(allocator: std.mem.Allocator, args: []const []const u8) u8 {
 
     sess.save() catch return errExit("save failed");
 
-    audit_mod.log("add", &.{.{ .key = "name", .value = name }});
+    audit_mod.log("add", .cli, &.{audit_mod.s("name", name)});
     tty.writeStdout("added ");
     tty.writeStdout(name);
     tty.writeStdout("\n");
@@ -459,7 +480,7 @@ fn runEdit(allocator: std.mem.Allocator, args: []const []const u8) u8 {
     ) catch return errExit("addSecret failed");
     sess.save() catch return errExit("save failed");
 
-    audit_mod.log("edit", &.{.{ .key = "name", .value = name }});
+    audit_mod.log("edit", .cli, &.{audit_mod.s("name", name)});
     tty.writeStdout("updated ");
     tty.writeStdout(name);
     tty.writeStdout("\n");
@@ -484,7 +505,7 @@ fn runRm(allocator: std.mem.Allocator, args: []const []const u8) u8 {
         else => return errExit("rm failed"),
     };
     sess.save() catch return errExit("save failed");
-    audit_mod.log("rm", &.{ .{ .key = "name", .value = name } });
+    audit_mod.log("rm", .cli, &.{audit_mod.s("name", name)});
     tty.writeStdout("removed ");
     tty.writeStdout(name);
     tty.writeStdout("\n");
@@ -760,13 +781,11 @@ fn runExec(allocator: std.mem.Allocator, args: []const []const u8) u8 {
         exit_code = 128 + @as(u8, @intCast(status & 0x7f));
     }
 
-    var exit_str: [8]u8 = undefined;
-    const exit_slice = std.fmt.bufPrint(&exit_str, "{d}", .{exit_code}) catch "?";
-    audit_mod.log("exec", &.{
-        .{ .key = "cmd", .value = base },
-        .{ .key = "tags", .value = tag_list_buf.items },
-        .{ .key = "cwd", .value = cwd },
-        .{ .key = "exit", .value = exit_slice },
+    audit_mod.log("exec", .cli, &.{
+        audit_mod.s("cmd", base),
+        audit_mod.arr("tags", tag_filter.items),
+        audit_mod.s("cwd", cwd),
+        audit_mod.n("exit", @intCast(exit_code)),
     });
     return exit_code;
 }
@@ -835,7 +854,7 @@ fn runRender(allocator: std.mem.Allocator, args: []const []const u8) u8 {
         return 1;
     };
 
-    audit_mod.log("render", &.{ .{ .key = "out", .value = out_path }, .{ .key = "template", .value = template_path } });
+    audit_mod.log("render", .cli, &.{ audit_mod.s("out", out_path), audit_mod.s("template", template_path) });
     tty.writeStdout("rendered ");
     tty.writeStdout(out_path);
     tty.writeStdout("\n");
@@ -874,16 +893,48 @@ fn runReveal(allocator: std.mem.Allocator, args: []const []const u8) u8 {
     tty.writeStdout(pt.bytes);
     tty.writeStdout("\n");
 
-    audit_mod.log("reveal", &.{ .{ .key = "name", .value = name } });
+    audit_mod.log("reveal", .cli, &.{audit_mod.s("name", name)});
     return 0;
+}
+
+// ------- mcp -------
+
+fn runMcp(allocator: std.mem.Allocator, args: []const []const u8) u8 {
+    var cwd: ?[]const u8 = null;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const a = args[i];
+        if (std.mem.eql(u8, a, "--cwd")) {
+            i += 1;
+            if (i >= args.len) {
+                tty.writeStderr("--cwd requires a value\n");
+                return 2;
+            }
+            cwd = args[i];
+        } else if (std.mem.eql(u8, a, "--allow-secret-read")) {
+            tty.writeStderr("--allow-secret-read is reserved for Phase 3 (Touch ID per-call confirmation); not implemented in v0.2.0\n");
+            return 2;
+        } else {
+            tty.writeStderr("unknown mcp flag: ");
+            tty.writeStderr(a);
+            tty.writeStderr("\n");
+            return 2;
+        }
+    }
+    return mcp_mod.serve(allocator, .{ .cwd = cwd });
 }
 
 // ------- reinstall-keychain -------
 
 fn runReinstallKeychain(allocator: std.mem.Allocator, args: []const []const u8) u8 {
-    if (args.len != 0) {
-        tty.writeStderr("usage: secretctl reinstall-keychain\n");
-        return 2;
+    var touch_id = false;
+    for (args) |a| {
+        if (std.mem.eql(u8, a, "--touch-id")) {
+            touch_id = true;
+        } else {
+            tty.writeStderr("usage: secretctl reinstall-keychain [--touch-id]\n");
+            return 2;
+        }
     }
     var p = paths_mod.resolve(allocator) catch return errExit("cannot resolve paths");
     defer p.deinit();
@@ -917,7 +968,10 @@ fn runReinstallKeychain(allocator: std.mem.Allocator, args: []const []const u8) 
 
     // Drop existing Keychain protector entries from the protector list.
     var kept = std.ArrayList(protector_mod.Protector).empty;
-    defer kept.deinit(allocator);
+    defer {
+        for (kept.items) |*pr| pr.deinit(allocator);
+        kept.deinit(allocator);
+    }
     for (parsed.protectors) |*pr| {
         if (pr.type_id == @intFromEnum(protector_mod.ProtectorType.macos_keychain)) {
             // dropping; protector body will be freed when parsed.deinit runs
@@ -928,9 +982,11 @@ fn runReinstallKeychain(allocator: std.mem.Allocator, args: []const []const u8) 
         pr.* = .{ .id = undefined, .type_id = 0, .created_at = 0, .body = &.{} };
     }
 
-    // Create a fresh Keychain protector — this creates the item with the
-    // correct trusted-app ACL.
-    const new_kp = keychain_mod.wrap(allocator, &master_key, &parsed.master_key_id) catch |e| switch (e) {
+    // Create a fresh Keychain protector with the correct trusted-app ACL.
+    // (The --touch-id body flag is recorded for forward compatibility but the
+    // actual biometry prompt is deferred to Phase 3.)
+    const flags: keychain_mod.Flags = if (touch_id) .touch_id else .default;
+    const new_kp = keychain_mod.wrapWithFlags(allocator, &master_key, &parsed.master_key_id, flags) catch |e| switch (e) {
         else => {
             tty.writeStderr("keychain protector creation failed\n");
             tty.writeStderr(@errorName(e));
@@ -950,12 +1006,15 @@ fn runReinstallKeychain(allocator: std.mem.Allocator, args: []const []const u8) 
     defer allocator.free(new_blob);
     fsx.writeAllAtomic(p.master_key, new_blob, 0o600) catch return errExit("write master.key failed");
 
-    // Free the moved protectors now that they're persisted.
-    for (kept.items) |*pr| pr.deinit(allocator);
-
-    audit_mod.log("reinstall-keychain", &.{});
-    tty.writeStdout("Keychain protector rebuilt. The next access will prompt once;\n");
-    tty.writeStdout("click \"Always Allow\" to suppress future prompts for this binary.\n");
+    audit_mod.log("reinstall-keychain", .cli, &.{audit_mod.b("touch_id", touch_id)});
+    if (touch_id) {
+        tty.writeStdout("Keychain protector rebuilt. The --touch-id flag is recorded but\n");
+        tty.writeStdout("biometric gating is deferred to Phase 3 — for now unlock still uses\n");
+        tty.writeStdout("the trusted-app ACL. Click \"Always Allow\" on the first prompt.\n");
+    } else {
+        tty.writeStdout("Keychain protector rebuilt. The next access will prompt once;\n");
+        tty.writeStdout("click \"Always Allow\" to suppress future prompts for this binary.\n");
+    }
     return 0;
 }
 

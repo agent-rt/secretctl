@@ -63,6 +63,7 @@ pub extern "Security" const kSecMatchLimitOne: CFStringRef;
 pub extern "Security" const kSecAttrAccessible: CFStringRef;
 pub extern "Security" const kSecAttrAccessibleWhenUnlocked: CFStringRef;
 pub extern "Security" const kSecAttrAccess: CFStringRef;
+pub extern "Security" const kSecAttrAccessControl: CFStringRef;
 pub extern "Security" const kCFBooleanTrue: CFTypeRef;
 
 pub extern "Security" fn SecItemAdd(attributes: CFDictionaryRef, result: ?*CFTypeRef) OSStatus;
@@ -94,6 +95,13 @@ pub extern "Security" fn SecAccessCreate(
     trustedList: CFArrayRef,
     access: *SecAccessRef,
 ) OSStatus;
+
+// Touch ID via Keychain ACL on classic keychain doesn't work for ad-hoc
+// signed CLI binaries without an Apple Developer Program entitlement.
+// Phase 3 will route biometry through LocalAuthentication.framework
+// (LAContext.evaluatePolicy) before fetching the keychain item, which
+// works for unsigned binaries. For now Phase 2 keeps the body flag plumbing
+// so that future upgrades don't need to migrate vault state.
 
 /// Helper: create a CFString from a Zig slice. Caller must CFRelease.
 pub fn cfString(bytes: []const u8) ?CFStringRef {
