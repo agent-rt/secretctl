@@ -20,3 +20,13 @@ jobs:
         run: zig build -Doptimize=ReleaseSafe
       - name: e2e
         run: bash tests/e2e.sh
+
+  nix-build:
+    name: nix build
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - run: nix build .#secretctl
+      - run: ./result/bin/secretctl --version
