@@ -42,6 +42,7 @@ pub const usage_text =
     \\  secretctl exec [--tag X] [--only N1,N2] -- COMMAND ARGS...
     \\  secretctl render TEMPLATE --out PATH
     \\  secretctl reveal NAME
+    \\  secretctl reinstall-keychain     # rebuild keychain protector ACL
     \\
     \\ENV:
     \\  $VISUAL / $EDITOR control which editor `edit` and `add --editor` launch.
@@ -72,6 +73,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) u8 {
     if (std.mem.eql(u8, cmd, "exec")) return runExec(allocator, tail);
     if (std.mem.eql(u8, cmd, "render")) return runRender(allocator, tail);
     if (std.mem.eql(u8, cmd, "reveal")) return runReveal(allocator, tail);
+    if (std.mem.eql(u8, cmd, "reinstall-keychain")) return runReinstallKeychain(allocator, tail);
 
     tty.writeStderr("unknown command: ");
     tty.writeStderr(cmd);
@@ -873,6 +875,87 @@ fn runReveal(allocator: std.mem.Allocator, args: []const []const u8) u8 {
     tty.writeStdout("\n");
 
     audit_mod.log("reveal", &.{ .{ .key = "name", .value = name } });
+    return 0;
+}
+
+// ------- reinstall-keychain -------
+
+fn runReinstallKeychain(allocator: std.mem.Allocator, args: []const []const u8) u8 {
+    if (args.len != 0) {
+        tty.writeStderr("usage: secretctl reinstall-keychain\n");
+        return 2;
+    }
+    var p = paths_mod.resolve(allocator) catch return errExit("cannot resolve paths");
+    defer p.deinit();
+    if (!fsx.fileExists(p.master_key)) {
+        tty.writeStderr("no vault found; run `secretctl init` first\n");
+        return 1;
+    }
+
+    // Read master.key blob.
+    const blob = fsx.readAllAlloc(allocator, p.master_key, 1 * 1024 * 1024) catch return errExit("read master.key failed");
+    defer allocator.free(blob);
+
+    // Force passphrase unlock (Keychain protector likely broken).
+    tty.writeStdout("Master password required to rebuild Keychain protector.\n");
+    var pw = tty.readPassword(allocator, "Master password: ") catch return errExit("password input failed");
+    defer pw.deinit();
+
+    var master_key: [aes.key_len]u8 = undefined;
+    var parsed = master_key_mod.parseAndUnlock(allocator, blob, pw.bytes, &master_key) catch |e| switch (e) {
+        master_key_mod.Error.AuthenticationFailed => {
+            tty.writeStderr("incorrect password\n");
+            return 1;
+        },
+        else => return errExit("vault unlock failed"),
+    };
+    defer parsed.deinit(allocator);
+    defer mem_util.secureZero(u8, &master_key);
+
+    // Delete the existing Keychain item (if any).
+    keychain_mod.deleteFor(&parsed.master_key_id) catch {};
+
+    // Drop existing Keychain protector entries from the protector list.
+    var kept = std.ArrayList(protector_mod.Protector).empty;
+    defer kept.deinit(allocator);
+    for (parsed.protectors) |*pr| {
+        if (pr.type_id == @intFromEnum(protector_mod.ProtectorType.macos_keychain)) {
+            // dropping; protector body will be freed when parsed.deinit runs
+            continue;
+        }
+        // Move ownership of pr to kept; clear from parsed so deinit doesn't double-free.
+        kept.append(allocator, pr.*) catch return errExit("oom");
+        pr.* = .{ .id = undefined, .type_id = 0, .created_at = 0, .body = &.{} };
+    }
+
+    // Create a fresh Keychain protector — this creates the item with the
+    // correct trusted-app ACL.
+    const new_kp = keychain_mod.wrap(allocator, &master_key, &parsed.master_key_id) catch |e| switch (e) {
+        else => {
+            tty.writeStderr("keychain protector creation failed\n");
+            tty.writeStderr(@errorName(e));
+            tty.writeStderr("\n");
+            return 1;
+        },
+    };
+    kept.append(allocator, new_kp) catch return errExit("oom");
+
+    // Re-serialize master.key.
+    const new_file: master_key_mod.MasterFile = .{
+        .master_key_id = parsed.master_key_id,
+        .master_key_version = parsed.master_key_version,
+        .protectors = kept.items,
+    };
+    const new_blob = master_key_mod.serialize(allocator, &new_file, &master_key) catch return errExit("serialize failed");
+    defer allocator.free(new_blob);
+    fsx.writeAllAtomic(p.master_key, new_blob, 0o600) catch return errExit("write master.key failed");
+
+    // Free the moved protectors now that they're persisted.
+    for (kept.items) |*pr| pr.deinit(allocator);
+
+    audit_mod.log("reinstall-keychain", &.{});
+    tty.writeStdout("Keychain protector rebuilt. The next access will prompt once;\n");
+    tty.writeStdout("click \"Always Allow\" to suppress future prompts for this binary.\n");
     return 0;
 }
 

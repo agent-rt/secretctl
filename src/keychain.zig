@@ -50,6 +50,34 @@ fn hexAccount(master_key_id: *const [16]u8, out: *[32]u8) void {
     }
 }
 
+/// Build a SecAccessRef whose ACL trusts only the current binary. Without
+/// this, the keychain item gets a default ACL that prompts the user on
+/// every access, even when called from the same code-signed binary that
+/// created it. Returns null on failure (caller proceeds without an ACL —
+/// degrades to "always prompt" UX but stays correct).
+fn buildSelfTrustedAccess() sf.SecAccessRef {
+    var self_app: sf.SecTrustedApplicationRef = null;
+    if (sf.SecTrustedApplicationCreateFromPath(null, &self_app) != sf.errSecSuccess) return null;
+    if (self_app == null) return null;
+
+    const apps_array = sf.CFArrayCreate(
+        sf.kCFAllocatorDefault,
+        @ptrCast(&self_app),
+        1,
+        @ptrCast(&sf.kCFTypeArrayCallBacks),
+    );
+    sf.CFRelease(self_app);
+    if (apps_array == null) return null;
+    defer sf.CFRelease(apps_array);
+
+    const label = sf.cfString("secretctl wrapping key") orelse return null;
+    defer sf.CFRelease(label);
+
+    var access: sf.SecAccessRef = null;
+    if (sf.SecAccessCreate(label, apps_array, &access) != sf.errSecSuccess) return null;
+    return access;
+}
+
 fn keychainStore(service: []const u8, account: []const u8, value: []const u8) Error!void {
     const cf_service = sf.cfString(service) orelse return Error.Unexpected;
     defer sf.CFRelease(cf_service);
@@ -60,7 +88,7 @@ fn keychainStore(service: []const u8, account: []const u8, value: []const u8) Er
 
     const dict = sf.CFDictionaryCreateMutable(
         sf.kCFAllocatorDefault,
-        5,
+        6,
         @ptrCast(&sf.kCFTypeDictionaryKeyCallBacks),
         @ptrCast(&sf.kCFTypeDictionaryValueCallBacks),
     ) orelse return Error.Unexpected;
@@ -71,6 +99,12 @@ fn keychainStore(service: []const u8, account: []const u8, value: []const u8) Er
     sf.CFDictionarySetValue(dict, @ptrCast(sf.kSecAttrAccount), @ptrCast(cf_account));
     sf.CFDictionarySetValue(dict, @ptrCast(sf.kSecValueData), @ptrCast(cf_value));
     sf.CFDictionarySetValue(dict, @ptrCast(sf.kSecAttrAccessible), @ptrCast(sf.kSecAttrAccessibleWhenUnlocked));
+
+    const access_ref = buildSelfTrustedAccess();
+    defer if (access_ref) |ar| sf.CFRelease(ar);
+    if (access_ref) |ar| {
+        sf.CFDictionarySetValue(dict, @ptrCast(sf.kSecAttrAccess), @ptrCast(ar));
+    }
 
     const status = sf.SecItemAdd(dict, null);
     if (status == sf.errSecDuplicateItem) {

@@ -62,11 +62,38 @@ pub extern "Security" const kSecMatchLimit: CFStringRef;
 pub extern "Security" const kSecMatchLimitOne: CFStringRef;
 pub extern "Security" const kSecAttrAccessible: CFStringRef;
 pub extern "Security" const kSecAttrAccessibleWhenUnlocked: CFStringRef;
+pub extern "Security" const kSecAttrAccess: CFStringRef;
 pub extern "Security" const kCFBooleanTrue: CFTypeRef;
 
 pub extern "Security" fn SecItemAdd(attributes: CFDictionaryRef, result: ?*CFTypeRef) OSStatus;
 pub extern "Security" fn SecItemCopyMatching(query: CFDictionaryRef, result: ?*CFTypeRef) OSStatus;
 pub extern "Security" fn SecItemDelete(query: CFDictionaryRef) OSStatus;
+
+// Trusted-app ACL APIs. Deprecated since 10.10 but the only way to attach a
+// trusted-app list to a classic Keychain item without entitlements; the
+// modern Data Protection Keychain requires a proper code-signing identity
+// that single-binary CLI tools generally don't have.
+pub const SecAccessRef = ?*anyopaque;
+pub const SecTrustedApplicationRef = ?*anyopaque;
+pub const CFArrayRef = ?*anyopaque;
+
+pub extern "CoreFoundation" fn CFArrayCreate(
+    alloc: CFAllocatorRef,
+    values: [*]const ?*const anyopaque,
+    numValues: CFIndex,
+    callBacks: ?*const anyopaque,
+) CFArrayRef;
+pub extern "CoreFoundation" const kCFTypeArrayCallBacks: anyopaque;
+
+pub extern "Security" fn SecTrustedApplicationCreateFromPath(
+    path: ?[*:0]const u8,
+    app: *SecTrustedApplicationRef,
+) OSStatus;
+pub extern "Security" fn SecAccessCreate(
+    descriptor: CFStringRef,
+    trustedList: CFArrayRef,
+    access: *SecAccessRef,
+) OSStatus;
 
 /// Helper: create a CFString from a Zig slice. Caller must CFRelease.
 pub fn cfString(bytes: []const u8) ?CFStringRef {
