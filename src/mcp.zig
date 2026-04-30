@@ -27,6 +27,9 @@ pub const server_version = "0.2.0";
 pub const Options = struct {
     /// Project root for `.secretctl.toml` lookup. Defaults to cwd if null.
     cwd: ?[]const u8 = null,
+    /// When true, expose `get_secret` (returns plaintext, gated by Touch ID
+    /// per call). Refuses to start if biometrics aren't available.
+    dangerous: bool = false,
 };
 
 /// JSON-RPC error codes (subset).
@@ -97,10 +100,12 @@ pub const Tool = struct {
     handler: ToolFn,
 };
 
-// Registry of tools. Implementations live in mcp_tools.zig (next task).
+// Registry of tools. Implementations live in mcp_tools.zig.
 const mcp_tools = @import("mcp_tools.zig");
 
-const tools: []const Tool = &mcp_tools.all_tools;
+fn activeTools(opts: *const Options) []const Tool {
+    return if (opts.dangerous) &mcp_tools.all_dangerous_tools else &mcp_tools.all_tools;
+}
 
 // ------- request handling -------
 
@@ -190,7 +195,8 @@ fn buildInitializeResult(allocator: std.mem.Allocator) ![]u8 {
     return enc.toOwnedSlice(allocator);
 }
 
-fn buildToolsListResult(allocator: std.mem.Allocator) ![]u8 {
+fn buildToolsListResult(allocator: std.mem.Allocator, opts: *const Options) ![]u8 {
+    const tools = activeTools(opts);
     var enc: jsonx.Encoder = .{};
     errdefer enc.deinit(allocator);
     try enc.writeByte(allocator, '{');
@@ -271,7 +277,7 @@ fn handleRequest(allocator: std.mem.Allocator, line: []const u8, opts: *const Op
         return;
     }
     if (std.mem.eql(u8, method, "tools/list")) {
-        const result = buildToolsListResult(allocator) catch {
+        const result = buildToolsListResult(allocator, opts) catch {
             writeRpcError(allocator, id_raw, ErrorCode.internal_error, "encode failed");
             return;
         };
@@ -296,7 +302,7 @@ fn handleRequest(allocator: std.mem.Allocator, line: []const u8, opts: *const Op
         const args_v = jsonx.objectGet(params_v, "arguments") orelse std.json.Value{ .null = {} };
 
         const tool = blk: {
-            for (tools) |t| if (std.mem.eql(u8, t.name, tool_name)) break :blk t;
+            for (activeTools(opts)) |t| if (std.mem.eql(u8, t.name, tool_name)) break :blk t;
             writeRpcError(allocator, id_raw, ErrorCode.invalid_params, "unknown tool");
             audit_mod.log("mcp.tools_call", .mcp, &.{ audit_mod.s("tool", tool_name), audit_mod.s("status", "unknown") });
             return;
@@ -338,6 +344,14 @@ fn handleRequest(allocator: std.mem.Allocator, line: []const u8, opts: *const Op
 }
 
 pub fn serve(allocator: std.mem.Allocator, opts: Options) u8 {
+    if (opts.dangerous) {
+        const local_auth = @import("local_auth.zig");
+        if (!local_auth.available()) {
+            tty.writeStderr("--allow-secret-read requires Touch ID hardware (LocalAuthentication unavailable)\n");
+            return 2;
+        }
+        tty.writeStderr("secretctl mcp dangerous mode: get_secret enabled (per-call Touch ID)\n");
+    }
     tty.writeStderr("secretctl mcp listening on stdio\n");
     while (true) {
         const maybe_line = readLine(allocator) catch |e| {
@@ -384,11 +398,22 @@ test "buildInitializeResult shape" {
     try testing.expect(std.mem.indexOf(u8, out, "\"capabilities\":{\"tools\":{}}") != null);
 }
 
-test "buildToolsListResult contains all tools" {
+test "buildToolsListResult safe mode" {
     const a = testing.allocator;
-    const out = try buildToolsListResult(a);
+    const opts: Options = .{};
+    const out = try buildToolsListResult(a, &opts);
     defer a.free(out);
-    for (tools) |t| {
+    for (activeTools(&opts)) |t| {
         try testing.expect(std.mem.indexOf(u8, out, t.name) != null);
     }
+    try testing.expect(std.mem.indexOf(u8, out, "get_secret") == null);
+}
+
+test "buildToolsListResult dangerous mode" {
+    const a = testing.allocator;
+    const opts: Options = .{ .dangerous = true };
+    const out = try buildToolsListResult(a, &opts);
+    defer a.free(out);
+    try testing.expect(std.mem.indexOf(u8, out, "get_secret") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "list_secrets") != null);
 }

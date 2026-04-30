@@ -25,11 +25,12 @@ pub const editor = @import("editor.zig");
 pub const jsonx = @import("jsonx.zig");
 pub const mcp = @import("mcp.zig");
 pub const mcp_tools = @import("mcp_tools.zig");
+pub const local_auth = @import("local_auth.zig");
 
 test {
     const std = @import("std");
     std.testing.refAllDecls(@This());
-    inline for (.{ mem, rand, clock, aes, argon2, protector, keychain, master_key, envelope, codec, fsx, vault, tty, edit_view, list_view, policy, audit, paths, cli, editor, jsonx, mcp, mcp_tools }) |m| {
+    inline for (.{ mem, rand, clock, aes, argon2, protector, keychain, master_key, envelope, codec, fsx, vault, tty, edit_view, list_view, policy, audit, paths, cli, editor, jsonx, mcp, mcp_tools, local_auth }) |m| {
         std.testing.refAllDecls(m);
     }
 }

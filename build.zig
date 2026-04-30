@@ -12,6 +12,12 @@ pub fn build(b: *std.Build) void {
     if (target.result.os.tag == .macos) {
         exe_mod.linkFramework("Security", .{});
         exe_mod.linkFramework("CoreFoundation", .{});
+        exe_mod.linkFramework("LocalAuthentication", .{});
+        exe_mod.linkFramework("Foundation", .{});
+        exe_mod.addCSourceFile(.{
+            .file = b.path("src/local_auth.m"),
+            .flags = &.{ "-fobjc-arc", "-Wno-everything" },
+        });
     }
     exe_mod.link_libc = true;
 
@@ -36,6 +42,12 @@ pub fn build(b: *std.Build) void {
     if (target.result.os.tag == .macos) {
         test_mod.linkFramework("Security", .{});
         test_mod.linkFramework("CoreFoundation", .{});
+        test_mod.linkFramework("LocalAuthentication", .{});
+        test_mod.linkFramework("Foundation", .{});
+        test_mod.addCSourceFile(.{
+            .file = b.path("src/local_auth.m"),
+            .flags = &.{ "-fobjc-arc", "-Wno-everything" },
+        });
     }
     test_mod.link_libc = true;
     const t = b.addTest(.{ .root_module = test_mod });

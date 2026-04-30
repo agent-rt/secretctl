@@ -29,6 +29,10 @@ pub const run_with_secrets_schema =
     \\{"type":"object","required":["command"],"properties":{"command":{"type":"string","description":"Executable name (basename must be in .secretctl.toml allow.commands)."},"args":{"type":"array","items":{"type":"string"},"description":"Arguments passed to the command."},"tags":{"type":"array","items":{"type":"string"},"description":"Inject every secret carrying any of these tags."},"only":{"type":"array","items":{"type":"string"},"description":"Inject these named secrets only."}}}
 ;
 
+pub const get_secret_schema =
+    \\{"type":"object","required":["name"],"properties":{"name":{"type":"string","description":"Secret name to reveal."}}}
+;
+
 pub const all_tools = [_]mcp.Tool{
     .{
         .name = "list_secrets",
@@ -47,6 +51,18 @@ pub const all_tools = [_]mcp.Tool{
         .description = "Run an allowlisted command with selected secrets injected as environment variables. Returns the child's stdout, stderr, and exit code.",
         .input_schema_json = run_with_secrets_schema,
         .handler = handleRunWithSecrets,
+    },
+};
+
+pub const all_dangerous_tools = [_]mcp.Tool{
+    all_tools[0],
+    all_tools[1],
+    all_tools[2],
+    .{
+        .name = "get_secret",
+        .description = "Reveal a secret value. Requires per-call Touch ID confirmation. Only available when the server was started with --allow-secret-read.",
+        .input_schema_json = get_secret_schema,
+        .handler = handleGetSecret,
     },
 };
 
@@ -465,6 +481,63 @@ fn handleRunWithSecrets(allocator: std.mem.Allocator, args: std.json.Value, opts
         try enc.writeBool(allocator, true);
     }
     try enc.writeByte(allocator, '}');
+
+    return .{ .json_text = try enc.toOwnedSlice(allocator), .is_error = false };
+}
+
+// ------- get_secret (dangerous) -------
+
+const local_auth = @import("local_auth.zig");
+const audit_mod = @import("audit.zig");
+
+fn handleGetSecret(allocator: std.mem.Allocator, args: std.json.Value, opts: *const mcp.Options) anyerror!mcp.ToolResult {
+    _ = opts;
+    const name_v = jsonx.objectGet(args, "name") orelse return errorResultMsg(allocator, "missing 'name'");
+    const name = jsonx.asString(name_v) orelse return errorResultMsg(allocator, "'name' must be string");
+
+    var sess = unlockSession(allocator) catch |e| return errorResult(allocator, e);
+    defer sess.deinit();
+
+    if (sess.body.findIndex(name) == null) {
+        audit_mod.log("mcp.get_secret", .mcp, &.{
+            audit_mod.s("name", name),
+            audit_mod.s("status", "not_found"),
+        });
+        return errorResultMsg(allocator, "secret not found");
+    }
+
+    // Per-call biometric gate.
+    var reason_buf: [256]u8 = undefined;
+    const reason = std.fmt.bufPrintZ(&reason_buf, "Reveal secret {s} to MCP agent", .{name}) catch return errorResultMsg(allocator, "name too long");
+    if (!local_auth.evaluate(reason.ptr)) {
+        audit_mod.log("mcp.get_secret", .mcp, &.{
+            audit_mod.s("name", name),
+            audit_mod.s("status", "denied"),
+        });
+        return errorResultMsg(allocator, "biometric authentication declined");
+    }
+
+    var pt = sess.body.revealSecret(allocator, &sess.master_key, &sess.master_key_id, name) catch |e| {
+        audit_mod.log("mcp.get_secret", .mcp, &.{
+            audit_mod.s("name", name),
+            audit_mod.s("status", "decrypt_failed"),
+        });
+        return errorResult(allocator, e);
+    };
+    defer pt.deinit();
+
+    var enc: jsonx.Encoder = .{};
+    errdefer enc.deinit(allocator);
+    try enc.writeByte(allocator, '{');
+    var first = true;
+    try jsonx.writeKey(&enc, allocator, "value", &first);
+    try enc.writeString(allocator, pt.bytes);
+    try enc.writeByte(allocator, '}');
+
+    audit_mod.log("mcp.get_secret", .mcp, &.{
+        audit_mod.s("name", name),
+        audit_mod.s("status", "ok"),
+    });
 
     return .{ .json_text = try enc.toOwnedSlice(allocator), .is_error = false };
 }

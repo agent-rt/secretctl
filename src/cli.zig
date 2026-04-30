@@ -43,7 +43,7 @@ pub const usage_text =
     \\  secretctl exec [--tag X] [--only N1,N2] -- COMMAND ARGS...
     \\  secretctl render TEMPLATE --out PATH
     \\  secretctl reveal NAME
-    \\  secretctl mcp [--cwd PATH]        # MCP server over stdio
+    \\  secretctl mcp [--cwd PATH] [--allow-secret-read]   # MCP server over stdio
     \\  secretctl reinstall-keychain [--touch-id]   # rebuild keychain protector
     \\
     \\ENV:
@@ -901,6 +901,7 @@ fn runReveal(allocator: std.mem.Allocator, args: []const []const u8) u8 {
 
 fn runMcp(allocator: std.mem.Allocator, args: []const []const u8) u8 {
     var cwd: ?[]const u8 = null;
+    var dangerous = false;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         const a = args[i];
@@ -912,8 +913,7 @@ fn runMcp(allocator: std.mem.Allocator, args: []const []const u8) u8 {
             }
             cwd = args[i];
         } else if (std.mem.eql(u8, a, "--allow-secret-read")) {
-            tty.writeStderr("--allow-secret-read is reserved for Phase 3 (Touch ID per-call confirmation); not implemented in v0.2.0\n");
-            return 2;
+            dangerous = true;
         } else {
             tty.writeStderr("unknown mcp flag: ");
             tty.writeStderr(a);
@@ -921,7 +921,7 @@ fn runMcp(allocator: std.mem.Allocator, args: []const []const u8) u8 {
             return 2;
         }
     }
-    return mcp_mod.serve(allocator, .{ .cwd = cwd });
+    return mcp_mod.serve(allocator, .{ .cwd = cwd, .dangerous = dangerous });
 }
 
 // ------- reinstall-keychain -------

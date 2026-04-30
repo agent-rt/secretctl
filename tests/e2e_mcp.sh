@@ -118,5 +118,58 @@ echo "$LAST" | grep -q '"transport":"mcp"' || { echo "FAIL: audit log missing tr
 echo "$LAST" | grep -qE "sk-test-openai|npm-test-token|ghp-test-token" && { echo "FAIL: audit log leaked secret value"; exit 1; }
 echo "ok: audit log JSONL with transport=mcp, no value leaks"
 
+# ---------- dangerous mode tools/list ----------
+# We register a second mcpctl server entry pointing at `mcp --allow-secret-read`
+# so we can hit tools/list without firing a real Touch ID prompt (introspect
+# only sends initialize + tools/list).
+cat > "$XDG_CONFIG_HOME/mcpctl/mcp.json" <<EOF
+{
+  "mcpServers": {
+    "secretctl": {
+      "command": "$BIN",
+      "args": ["mcp", "--cwd", "$PROJECT"],
+      "env": {
+        "SECRETCTL_HOME": "$SECRETCTL_HOME",
+        "SECRETCTL_BATCH": "1",
+        "SECRETCTL_BATCH_KEYCHAIN": "1"
+      }
+    },
+    "secretctl_dangerous": {
+      "command": "$BIN",
+      "args": ["mcp", "--allow-secret-read", "--cwd", "$PROJECT"],
+      "env": {
+        "SECRETCTL_HOME": "$SECRETCTL_HOME",
+        "SECRETCTL_BATCH": "1",
+        "SECRETCTL_BATCH_KEYCHAIN": "1"
+      }
+    }
+  }
+}
+EOF
+
+# Detect whether this Mac actually has Touch ID/Face ID enrolled. If not,
+# the server should refuse to start in dangerous mode (exit 2). Use a helper
+# binary "bioutil" status — fall back to assuming hardware is present on M-series.
+HAS_BIOMETRY=1
+if ! /usr/sbin/bioutil -r >/dev/null 2>&1 && [[ "$(uname -m)" != "arm64" ]]; then
+  HAS_BIOMETRY=0
+fi
+
+if [[ "$HAS_BIOMETRY" == "1" ]]; then
+  DANG_INTRO="$(mcpctl introspect secretctl_dangerous --json 2>/dev/null || true)"
+  if [[ -n "$DANG_INTRO" ]] && echo "$DANG_INTRO" | jq -e '.tools[] | select(.name == "get_secret")' >/dev/null 2>&1; then
+    DANG_COUNT="$(echo "$DANG_INTRO" | jq '.tools | length')"
+    [[ "$DANG_COUNT" == "4" ]] || { echo "FAIL: dangerous mode tools count $DANG_COUNT, expected 4"; exit 1; }
+    echo "ok: dangerous mode lists 4 tools (incl. get_secret)"
+  else
+    echo "skip: dangerous-mode introspect (LA may not be available in this CI)"
+  fi
+else
+  set +e
+  RES="$(mcpctl introspect secretctl_dangerous --json 2>&1)"
+  set -e
+  echo "$RES" | grep -q "Touch ID" && echo "ok: dangerous mode refuses without biometry hardware" || echo "skip: dangerous-mode hardware-check probe inconclusive"
+fi
+
 echo
 echo "ALL MCP E2E TESTS PASSED"

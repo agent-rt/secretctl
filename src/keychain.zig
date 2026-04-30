@@ -16,6 +16,7 @@ const mem_util = @import("mem.zig");
 const rand = @import("rand.zig");
 const clock = @import("clock.zig");
 const protector = @import("protector.zig");
+const local_auth = @import("local_auth.zig");
 
 pub const Error = error{
     OutOfMemory,
@@ -271,13 +272,20 @@ pub fn unwrap(
 ) Error!void {
     if (body.len < 2) return Error.MalformedBody;
     var r: usize = 0;
+    var body_flags: u8 = 0;
     // Sniff v0.2 magic. If absent, treat as v0.1 layout (no flags byte).
     if (body.len >= body_magic_v2.len and std.mem.eql(u8, body[0..body_magic_v2.len], body_magic_v2)) {
         r += body_magic_v2.len;
         if (body.len < r + 1) return Error.MalformedBody;
-        // flags byte — informational; the actual access mode is set at item
-        // creation time in Keychain. We don't need to act on it here.
+        body_flags = body[r];
         r += 1;
+    }
+    // Touch ID gate: prompt for biometric auth before reading the keychain.
+    // On cancel/failure, surface as AuthenticationFailed so the caller falls
+    // back to the next protector (passphrase).
+    if (body_flags == @intFromEnum(Flags.touch_id)) {
+        const ok = local_auth.evaluate("Unlock secretctl vault");
+        if (!ok) return Error.AuthenticationFailed;
     }
     if (body.len < r + 2) return Error.MalformedBody;
     const service_len = std.mem.readInt(u16, body[r..][0..2], .little);
