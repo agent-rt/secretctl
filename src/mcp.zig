@@ -22,7 +22,7 @@ const STDOUT: c_int = 1;
 
 pub const protocol_version = "2024-11-05";
 pub const server_name = "secretctl";
-pub const server_version = "0.2.0";
+pub const server_version = "0.4.0";
 
 pub const Options = struct {
     /// Project root for `.secretctl.toml` lookup. Defaults to cwd if null.
