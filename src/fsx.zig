@@ -74,6 +74,17 @@ pub fn mkdirP(path: []const u8, mode: mode_t) Error!void {
     }
 }
 
+/// `mkdir -p` equivalent. Creates `path` and any missing parents using `mode`
+/// for newly-created directories. Existing directories are left untouched.
+pub fn mkdirAll(path: []const u8, mode: mode_t) Error!void {
+    if (path.len == 0) return;
+    if (fileExists(path)) return;
+    if (std.fs.path.dirname(path)) |parent| {
+        if (parent.len > 0 and !fileExists(parent)) try mkdirAll(parent, mode);
+    }
+    try mkdirP(path, mode);
+}
+
 pub fn readAllAlloc(allocator: std.mem.Allocator, path: []const u8, max_bytes: usize) Error![]u8 {
     var pbuf: [max_path + 1]u8 = undefined;
     const cpath = try toCStr(&pbuf, path);

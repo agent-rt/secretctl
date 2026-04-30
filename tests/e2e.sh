@@ -211,6 +211,35 @@ LIST_FINAL="$(printf "%s\n" "$PASS" | "$BIN" list --json)"
 echo "$LIST_FINAL" | grep -q '"name":"EMPTY_SECRET"' && { echo "FAIL: empty editor must not create secret"; exit 1; }
 echo "ok: add --editor with empty content exits 1 and creates nothing"
 
+# ---------- materialize: simple token ----------
+TOKEN_OUT="$WORK/token-out"
+printf "%s\n" "$PASS" | "$BIN" materialize NPM_TOKEN --out "$TOKEN_OUT" >/dev/null
+[[ "$(/usr/bin/stat -f %A "$TOKEN_OUT")" == "600" ]] || { echo "FAIL: materialize default mode not 0600"; exit 1; }
+[[ "$(cat "$TOKEN_OUT")" == "sk-test-token-12345" ]] || { echo "FAIL: materialize content mismatch"; exit 1; }
+# Verify no trailing newline (file size == value size)
+[[ "$(wc -c < "$TOKEN_OUT" | tr -d ' ')" == "$(printf "sk-test-token-12345" | wc -c | tr -d ' ')" ]] || { echo "FAIL: materialize added newline"; exit 1; }
+echo "ok: materialize single-line, 0600, no trailing newline"
+
+# ---------- materialize: --mode override ----------
+printf "%s\n" "$PASS" | "$BIN" materialize NPM_TOKEN --out "$TOKEN_OUT.0644" --mode 0644 >/dev/null
+[[ "$(/usr/bin/stat -f %A "$TOKEN_OUT.0644")" == "644" ]] || { echo "FAIL: materialize --mode 0644"; exit 1; }
+echo "ok: materialize --mode override"
+
+# ---------- materialize: --mkdir creates parent ----------
+NESTED="$WORK/nested/deep/dir/secret"
+printf "%s\n" "$PASS" | "$BIN" materialize NPM_TOKEN --out "$NESTED" --mkdir >/dev/null
+[[ -f "$NESTED" ]] || { echo "FAIL: --mkdir didn't create nested"; exit 1; }
+[[ "$(/usr/bin/stat -f %A "$WORK/nested/deep/dir")" == "700" ]] || { echo "FAIL: parent dir not 0700"; exit 1; }
+echo "ok: materialize --mkdir creates parents"
+
+# ---------- materialize: missing secret → exit 2 ----------
+set +e
+printf "%s\n" "$PASS" | "$BIN" materialize NOT_A_SECRET --out "$WORK/x" 2>/dev/null
+EC=$?
+set -e
+[[ $EC -eq 2 ]] || { echo "FAIL: missing secret should exit 2, got $EC"; exit 1; }
+echo "ok: materialize missing secret exits 2"
+
 # ---------- editor: temp files left behind? ----------
 LEFTOVER=$(ls "$WORK"/secretctl-edit-* 2>/dev/null || true)
 if [[ -n "$LEFTOVER" ]]; then

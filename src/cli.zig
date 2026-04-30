@@ -43,6 +43,7 @@ pub const usage_text =
     \\  secretctl list [--json] [--tag X]
     \\  secretctl exec [--tag X] [--only N1,N2] -- COMMAND ARGS...
     \\  secretctl render TEMPLATE --out PATH
+    \\  secretctl materialize NAME --out PATH [--mode MODE] [--mkdir]
     \\  secretctl reveal NAME
     \\  secretctl mcp [--cwd PATH] [--allow-secret-read]   # MCP server over stdio
     \\  secretctl reinstall-keychain [--no-touch-id]   # rebuild keychain protector
@@ -75,6 +76,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) u8 {
     if (std.mem.eql(u8, cmd, "list")) return runList(allocator, tail);
     if (std.mem.eql(u8, cmd, "exec")) return runExec(allocator, tail);
     if (std.mem.eql(u8, cmd, "render")) return runRender(allocator, tail);
+    if (std.mem.eql(u8, cmd, "materialize")) return runMaterialize(allocator, tail);
     if (std.mem.eql(u8, cmd, "reveal")) return runReveal(allocator, tail);
     if (std.mem.eql(u8, cmd, "mcp")) return runMcp(allocator, tail);
     if (std.mem.eql(u8, cmd, "reinstall-keychain")) return runReinstallKeychain(allocator, tail);
@@ -884,6 +886,98 @@ fn runRender(allocator: std.mem.Allocator, args: []const []const u8) u8 {
     audit_mod.log("render", .cli, &.{ audit_mod.s("out", out_path), audit_mod.s("template", template_path) });
     tty.writeStdout("rendered ");
     tty.writeStdout(out_path);
+    tty.writeStdout("\n");
+    return 0;
+}
+
+// ------- materialize -------
+
+fn runMaterialize(allocator: std.mem.Allocator, args: []const []const u8) u8 {
+    var name: ?[]const u8 = null;
+    var out_path: ?[]const u8 = null;
+    var mode: u16 = 0o600;
+    var mkdir = false;
+
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const a = args[i];
+        if (std.mem.eql(u8, a, "--out")) {
+            i += 1;
+            if (i >= args.len) {
+                tty.writeStderr("--out requires a value\n");
+                return 2;
+            }
+            out_path = args[i];
+        } else if (std.mem.eql(u8, a, "--mode")) {
+            i += 1;
+            if (i >= args.len) {
+                tty.writeStderr("--mode requires a value\n");
+                return 2;
+            }
+            mode = std.fmt.parseInt(u16, args[i], 8) catch {
+                tty.writeStderr("--mode must be octal (e.g. 0600)\n");
+                return 2;
+            };
+        } else if (std.mem.eql(u8, a, "--mkdir")) {
+            mkdir = true;
+        } else if (std.mem.startsWith(u8, a, "--")) {
+            tty.writeStderr("unknown materialize flag: ");
+            tty.writeStderr(a);
+            tty.writeStderr("\n");
+            return 2;
+        } else if (name == null) {
+            name = a;
+        } else {
+            tty.writeStderr("unexpected argument: ");
+            tty.writeStderr(a);
+            tty.writeStderr("\n");
+            return 2;
+        }
+    }
+
+    if (name == null or out_path == null) {
+        tty.writeStderr("usage: secretctl materialize NAME --out PATH [--mode MODE] [--mkdir]\n");
+        return 2;
+    }
+
+    if (mkdir) {
+        if (std.fs.path.dirname(out_path.?)) |parent| {
+            fsx.mkdirAll(parent, 0o700) catch return errExit("mkdir parent failed");
+        }
+    }
+
+    var sess = unlockSession(allocator) orelse return 1;
+    defer sess.deinit();
+
+    var pt = sess.body.revealSecret(allocator, &sess.master_key, &sess.master_key_id, name.?) catch |e| switch (e) {
+        vault_mod.Error.NotFound => {
+            tty.writeStderr("secret not found: ");
+            tty.writeStderr(name.?);
+            tty.writeStderr("\n");
+            return 2;
+        },
+        else => return errExit("decrypt failed"),
+    };
+    defer pt.deinit();
+
+    fsx.writeAllAtomic(out_path.?, pt.bytes, mode) catch {
+        tty.writeStderr("cannot write output: ");
+        tty.writeStderr(out_path.?);
+        tty.writeStderr("\n");
+        return 1;
+    };
+
+    var mode_buf: [8]u8 = undefined;
+    const mode_str = std.fmt.bufPrint(&mode_buf, "0{o}", .{mode}) catch "?";
+    audit_mod.log("materialize", .cli, &.{
+        audit_mod.s("name", name.?),
+        audit_mod.s("out", out_path.?),
+        audit_mod.s("mode", mode_str),
+    });
+    tty.writeStdout("materialized ");
+    tty.writeStdout(name.?);
+    tty.writeStdout(" → ");
+    tty.writeStdout(out_path.?);
     tty.writeStdout("\n");
     return 0;
 }
