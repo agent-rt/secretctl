@@ -22,6 +22,10 @@ const editor_mod = @import("editor.zig");
 const envelope_mod = @import("envelope.zig");
 const mcp_mod = @import("mcp.zig");
 const local_auth = @import("local_auth.zig");
+const clock_mod = @import("clock.zig");
+extern "c" fn dup2(oldfd: c_int, newfd: c_int) c_int;
+extern "c" fn close(fd: c_int) c_int;
+extern "c" fn read(fd: c_int, buf: [*]u8, count: usize) isize;
 
 pub const ExitCode = enum(u8) {
     success = 0,
@@ -46,6 +50,8 @@ pub const usage_text =
     \\  secretctl materialize NAME --out PATH [--mode MODE] [--mkdir]
     \\  secretctl reveal NAME
     \\  secretctl mcp [--cwd PATH] [--allow-secret-read]   # MCP server over stdio
+    \\  secretctl key add-keychain-protector [--no-touch-id]   # add another machine's keychain unlock path
+    \\  secretctl sync                       # git pull/commit/push the vault dir
     \\  secretctl reinstall-keychain [--no-touch-id]   # rebuild keychain protector
     \\
     \\ENV:
@@ -79,6 +85,8 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) u8 {
     if (std.mem.eql(u8, cmd, "materialize")) return runMaterialize(allocator, tail);
     if (std.mem.eql(u8, cmd, "reveal")) return runReveal(allocator, tail);
     if (std.mem.eql(u8, cmd, "mcp")) return runMcp(allocator, tail);
+    if (std.mem.eql(u8, cmd, "key")) return runKey(allocator, tail);
+    if (std.mem.eql(u8, cmd, "sync")) return runSync(allocator, tail);
     if (std.mem.eql(u8, cmd, "reinstall-keychain")) return runReinstallKeychain(allocator, tail);
 
     tty.writeStderr("unknown command: ");
@@ -854,11 +862,11 @@ fn runRender(allocator: std.mem.Allocator, args: []const []const u8) u8 {
             continue;
         }
         if (template[i] == '$' and i + 1 < template.len and template[i + 1] == '{') {
-            const close = std.mem.indexOfScalarPos(u8, template, i + 2, '}') orelse {
+            const close_brace = std.mem.indexOfScalarPos(u8, template, i + 2, '}') orelse {
                 tty.writeStderr("unterminated ${...} placeholder in template\n");
                 return 2;
             };
-            const name = template[i + 2 .. close];
+            const name = template[i + 2 .. close_brace];
             const idx = sess.body.findIndex(name) orelse {
                 tty.writeStderr("template references unknown secret: ");
                 tty.writeStderr(name);
@@ -869,7 +877,7 @@ fn runRender(allocator: std.mem.Allocator, args: []const []const u8) u8 {
             var pt = envelope_mod.decrypt(allocator, &sess.master_key, &sess.master_key_id, &rec.id, &rec.envelope) catch return errExit("decrypt failed");
             defer pt.deinit();
             out.appendSlice(allocator, pt.bytes) catch return errExit("oom");
-            i = close + 1;
+            i = close_brace + 1;
             continue;
         }
         out.append(allocator, template[i]) catch return errExit("oom");
@@ -1043,6 +1051,260 @@ fn runMcp(allocator: std.mem.Allocator, args: []const []const u8) u8 {
         }
     }
     return mcp_mod.serve(allocator, .{ .cwd = cwd, .dangerous = dangerous });
+}
+
+// ------- key (sub-dispatcher) -------
+
+fn runKey(allocator: std.mem.Allocator, args: []const []const u8) u8 {
+    if (args.len == 0) {
+        tty.writeStderr("usage: secretctl key add-keychain-protector [--touch-id|--no-touch-id]\n");
+        return 2;
+    }
+    const sub = args[0];
+    const tail = args[1..];
+    if (std.mem.eql(u8, sub, "add-keychain-protector")) return runKeyAddKeychainProtector(allocator, tail);
+    tty.writeStderr("unknown key subcommand: ");
+    tty.writeStderr(sub);
+    tty.writeStderr("\n");
+    return 2;
+}
+
+fn runKeyAddKeychainProtector(allocator: std.mem.Allocator, args: []const []const u8) u8 {
+    var touch_id_flag: ?bool = null;
+    for (args) |a| {
+        if (std.mem.eql(u8, a, "--touch-id")) {
+            touch_id_flag = true;
+        } else if (std.mem.eql(u8, a, "--no-touch-id")) {
+            touch_id_flag = false;
+        } else {
+            tty.writeStderr("unknown flag: ");
+            tty.writeStderr(a);
+            tty.writeStderr("\n");
+            return 2;
+        }
+    }
+    const batch = c_getenv("SECRETCTL_BATCH") != null;
+    const touch_id = blk: {
+        if (touch_id_flag) |v| {
+            if (v and !local_auth.available()) {
+                tty.writeStderr("--touch-id requested but Touch ID/Face ID is not available\n");
+                return 2;
+            }
+            break :blk v;
+        }
+        if (batch) break :blk false;
+        break :blk local_auth.available();
+    };
+
+    var p = paths_mod.resolve(allocator) catch return errExit("cannot resolve paths");
+    defer p.deinit();
+    if (!fsx.fileExists(p.master_key)) {
+        tty.writeStderr("no vault found; run `secretctl init` first\n");
+        return 1;
+    }
+
+    const blob = fsx.readAllAlloc(allocator, p.master_key, 1 * 1024 * 1024) catch return errExit("read master.key failed");
+    defer allocator.free(blob);
+
+    var master_key: [aes.key_len]u8 = undefined;
+    defer mem_util.secureZero(u8, &master_key);
+
+    // Try silent keychain unwrap first; fall back to password.
+    var parsed = master_key_mod.parseAndUnlock(allocator, blob, null, &master_key) catch |e| switch (e) {
+        master_key_mod.Error.AuthenticationFailed,
+        master_key_mod.Error.NoUsableProtector,
+        => null,
+        else => return errExit("vault unlock failed"),
+    } orelse blk: {
+        tty.writeStdout("Master password required to add a new keychain protector.\n");
+        var pw = tty.readPassword(allocator, "Master password: ") catch return errExit("password input failed");
+        defer pw.deinit();
+        break :blk master_key_mod.parseAndUnlock(allocator, blob, pw.bytes, &master_key) catch |e| switch (e) {
+            master_key_mod.Error.AuthenticationFailed => {
+                tty.writeStderr("incorrect password\n");
+                return 1;
+            },
+            else => return errExit("vault unlock failed"),
+        };
+    };
+    defer parsed.deinit(allocator);
+
+    // Build a new keychain protector, append to existing list.
+    const flags: keychain_mod.Flags = if (touch_id) .touch_id else .default;
+    var new_protector = keychain_mod.wrapWithFlags(allocator, &master_key, &parsed.master_key_id, flags) catch |e| {
+        tty.writeStderr("keychain protector creation failed: ");
+        tty.writeStderr(@errorName(e));
+        tty.writeStderr("\n");
+        return 1;
+    };
+    defer new_protector.deinit(allocator);
+
+    // Append to in-memory protectors slice (resize via temporary ArrayList).
+    // Note: combined items reference body pointers owned elsewhere
+    // (parsed.protectors via parsed.deinit, new_protector via the defer above).
+    var combined: std.ArrayList(protector_mod.Protector) = .empty;
+    defer combined.deinit(allocator);
+    for (parsed.protectors) |pr| {
+        combined.append(allocator, pr) catch return errExit("oom");
+    }
+    combined.append(allocator, new_protector) catch return errExit("oom");
+
+    const new_file: master_key_mod.MasterFile = .{
+        .master_key_id = parsed.master_key_id,
+        .master_key_version = parsed.master_key_version,
+        .protectors = combined.items,
+    };
+    const new_blob = master_key_mod.serialize(allocator, &new_file, &master_key) catch return errExit("serialize failed");
+    defer allocator.free(new_blob);
+    fsx.writeAllAtomic(p.master_key, new_blob, 0o600) catch return errExit("write master.key failed");
+
+    audit_mod.log("key.add-keychain-protector", .cli, &.{
+        audit_mod.b("touch_id", touch_id),
+    });
+    if (touch_id) {
+        tty.writeStdout("Added Touch ID keychain protector for this machine.\n");
+    } else {
+        tty.writeStdout("Added keychain protector for this machine (default ACL).\n");
+    }
+    tty.writeStdout("Now commit and push ~/.secretctl/master.key so the other machines see the new protector.\n");
+    return 0;
+}
+
+// ------- sync -------
+
+extern "c" fn chdir(path: [*:0]const u8) c_int;
+extern "c" fn gethostname(buf: [*]u8, len: usize) c_int;
+
+fn runGitInDir(allocator: std.mem.Allocator, dir: []const u8, argv: []const []const u8, capture_stdout: bool) struct { exit: u8, stdout: []u8 } {
+    var pipe_out: [2]c_int = undefined;
+    if (capture_stdout) {
+        if (pipe(&pipe_out) != 0) return .{ .exit = 1, .stdout = &.{} };
+    }
+
+    const pid = fork();
+    if (pid < 0) return .{ .exit = 1, .stdout = &.{} };
+    if (pid == 0) {
+        var dir_z_buf: [1024]u8 = undefined;
+        if (dir.len >= dir_z_buf.len) std.process.exit(1);
+        @memcpy(dir_z_buf[0..dir.len], dir);
+        dir_z_buf[dir.len] = 0;
+        if (chdir(@ptrCast(&dir_z_buf[0])) != 0) std.process.exit(1);
+
+        if (capture_stdout) {
+            _ = dup2(pipe_out[1], 1);
+            _ = close(pipe_out[0]);
+            _ = close(pipe_out[1]);
+        }
+
+        // Build NUL-terminated argv (allocSentinel is fine here; child exits or execs).
+        var arena_buf: [16][:0]u8 = undefined;
+        var argv_ptrs: [16]?[*:0]const u8 = undefined;
+        if (argv.len + 1 > arena_buf.len) std.process.exit(1);
+        for (argv, 0..) |arg, i| {
+            const z = allocator.allocSentinel(u8, arg.len, 0) catch std.process.exit(1);
+            @memcpy(z, arg);
+            arena_buf[i] = z;
+            argv_ptrs[i] = z.ptr;
+        }
+        argv_ptrs[argv.len] = null;
+        const argv_terminated: [*:null]const ?[*:0]const u8 = @ptrCast(&argv_ptrs[0]);
+        _ = execvp(argv_ptrs[0].?, argv_terminated);
+        std.process.exit(127);
+    }
+
+    var captured: []u8 = &.{};
+    if (capture_stdout) {
+        _ = close(pipe_out[1]);
+        var buf: std.ArrayList(u8) = .empty;
+        var chunk: [4096]u8 = undefined;
+        while (true) {
+            const n = read(pipe_out[0], &chunk, chunk.len);
+            if (n <= 0) break;
+            buf.appendSlice(allocator, chunk[0..@intCast(n)]) catch break;
+        }
+        _ = close(pipe_out[0]);
+        captured = buf.toOwnedSlice(allocator) catch &.{};
+    }
+
+    var status: c_int = 0;
+    _ = waitpid(pid, &status, 0);
+    var ec: u8 = 0;
+    if ((status & 0x7f) == 0) ec = @intCast((status >> 8) & 0xff) else ec = 1;
+    return .{ .exit = ec, .stdout = captured };
+}
+
+extern "c" fn pipe(fds: *[2]c_int) c_int;
+
+fn runSync(allocator: std.mem.Allocator, args: []const []const u8) u8 {
+    if (args.len != 0) {
+        tty.writeStderr("usage: secretctl sync\n");
+        return 2;
+    }
+    var p = paths_mod.resolve(allocator) catch return errExit("cannot resolve paths");
+    defer p.deinit();
+
+    // Verify ~/.secretctl/.git exists.
+    var git_dir_buf: [1024]u8 = undefined;
+    const git_dir = std.fmt.bufPrint(&git_dir_buf, "{s}/.git", .{p.home}) catch return errExit("path too long");
+    if (!fsx.fileExists(git_dir)) {
+        tty.writeStderr("not a git repository: ");
+        tty.writeStderr(p.home);
+        tty.writeStderr("\nrun `git init` in there and push to a remote first (see /secretctl/sync/ docs)\n");
+        return 2;
+    }
+
+    // 1. Stage everything
+    _ = runGitInDir(allocator, p.home, &.{ "git", "add", "-A" }, false);
+
+    // 2. Commit if there's anything staged
+    const diff = runGitInDir(allocator, p.home, &.{ "git", "diff", "--cached", "--quiet" }, false);
+    var did_commit = false;
+    if (diff.exit != 0) {
+        var hn: [256]u8 = undefined;
+        @memset(&hn, 0);
+        _ = gethostname(&hn, hn.len);
+        const host = std.mem.sliceTo(&hn, 0);
+        var msg_buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(&msg_buf, "vault: {s} {d}", .{ host, clock_mod.unixSeconds() }) catch "vault: sync";
+        const cm = runGitInDir(allocator, p.home, &.{ "git", "commit", "-m", msg }, false);
+        if (cm.exit != 0) {
+            tty.writeStderr("git commit failed\n");
+            audit_mod.log("sync", .cli, &.{ audit_mod.s("step", "commit"), audit_mod.s("status", "failed") });
+            return 1;
+        }
+        did_commit = true;
+    }
+
+    // 3. Pull with fast-forward only. Diverged history = bail; user resolves.
+    {
+        const r = runGitInDir(allocator, p.home, &.{ "git", "pull", "--ff-only" }, false);
+        if (r.exit != 0) {
+            tty.writeStderr("git pull --ff-only failed (history has diverged); resolve manually:\n");
+            tty.writeStderr("  cd ");
+            tty.writeStderr(p.home);
+            tty.writeStderr(" && git pull   # then `git checkout --theirs vault` (or --ours) and commit\n");
+            audit_mod.log("sync", .cli, &.{ audit_mod.s("step", "pull"), audit_mod.s("status", "diverged") });
+            return 1;
+        }
+    }
+
+    // 4. Push
+    {
+        const r = runGitInDir(allocator, p.home, &.{ "git", "push" }, false);
+        if (r.exit != 0) {
+            tty.writeStderr("git push failed (remote rejected? run `git push` manually for diagnostics)\n");
+            audit_mod.log("sync", .cli, &.{ audit_mod.s("step", "push"), audit_mod.s("status", "failed") });
+            return 1;
+        }
+    }
+
+    audit_mod.log("sync", .cli, &.{audit_mod.s("status", if (did_commit) "committed" else "nochange")});
+    if (did_commit) {
+        tty.writeStdout("synced (committed + pushed local changes)\n");
+    } else {
+        tty.writeStdout("synced (no local changes; remote up-to-date)\n");
+    }
+    return 0;
 }
 
 // ------- reinstall-keychain -------
