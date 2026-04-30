@@ -4,12 +4,30 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // In nix sandboxes there's no Xcode toolchain, so Zig can't auto-detect
+    // the macOS SDK. The apple-sdk derivation exports `SDKROOT`; if it's set
+    // we hand its framework dir to every module that needs Apple frameworks.
+    const sdk_paths: ?struct {
+        framework: std.Build.LazyPath,
+        include: std.Build.LazyPath,
+    } = blk: {
+        const sdkroot = b.graph.environ_map.get("SDKROOT") orelse break :blk null;
+        break :blk .{
+            .framework = .{ .cwd_relative = b.pathJoin(&.{ sdkroot, "System", "Library", "Frameworks" }) },
+            .include = .{ .cwd_relative = b.pathJoin(&.{ sdkroot, "usr", "include" }) },
+        };
+    };
+
     const exe_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
     });
     if (target.result.os.tag == .macos) {
+        if (sdk_paths) |p| {
+            exe_mod.addFrameworkPath(p.framework);
+            exe_mod.addSystemIncludePath(p.include);
+        }
         exe_mod.linkFramework("Security", .{});
         exe_mod.linkFramework("CoreFoundation", .{});
         exe_mod.linkFramework("LocalAuthentication", .{});
@@ -40,6 +58,10 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     if (target.result.os.tag == .macos) {
+        if (sdk_paths) |p| {
+            test_mod.addFrameworkPath(p.framework);
+            test_mod.addSystemIncludePath(p.include);
+        }
         test_mod.linkFramework("Security", .{});
         test_mod.linkFramework("CoreFoundation", .{});
         test_mod.linkFramework("LocalAuthentication", .{});
