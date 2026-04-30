@@ -20,7 +20,7 @@
 #       GH_PACKAGES_TOKEN = { secretName = "github_packages_token"; };
 #     };
 #     fileSecrets = {
-#       "SSH_KEY_WORK" = { path = ".ssh/work"; mode = "0600"; };
+#       SSH_KEY_WORK = { path = ".ssh/work"; mode = "0600"; };
 #     };
 #   };
 #
@@ -154,7 +154,7 @@ in
       type = lib.types.attrsOf fileSecretType;
       default = { };
       example = lib.literalExpression ''
-        { "SSH_KEY_WORK" = { path = ".ssh/work"; mode = "0600"; }; }
+        { SSH_KEY_WORK = { path = ".ssh/work"; mode = "0600"; }; }
       '';
       description = ''
         Secrets that should be materialized to specific paths with custom
