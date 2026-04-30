@@ -1,0 +1,184 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. v0.1.0)'
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  PRODUCT: secretctl
+  TAP_REPO: agent-rt/homebrew-tap
+
+jobs:
+  build:
+    name: Build & publish (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            zig_target: aarch64-macos
+            os: macos-14
+          - target: x86_64-apple-darwin
+            zig_target: x86_64-macos
+            os: macos-13
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve tag
+        id: tag
+        run: |
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          VERSION="${TAG#v}"
+          echo "tag=$TAG"                              >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION"                      >> "$GITHUB_OUTPUT"
+          echo "rel_tag=${{ env.PRODUCT }}-${TAG}"     >> "$GITHUB_OUTPUT"
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Build release binary
+        run: |
+          zig build -Doptimize=ReleaseSafe -Dtarget=${{ matrix.zig_target }}
+          ls -la zig-out/bin/${{ env.PRODUCT }}
+
+      - name: Package tarball
+        id: pkg
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.tag.outputs.version }}"
+          NAME="${{ env.PRODUCT }}-${VERSION}-${{ matrix.target }}"
+          mkdir -p "dist/${NAME}"
+          cp "zig-out/bin/${{ env.PRODUCT }}" "dist/${NAME}/"
+          cp README.md LICENSE "dist/${NAME}/"
+          cd dist
+          tar -czf "${NAME}.tar.gz" "${NAME}"
+          shasum -a 256 "${NAME}.tar.gz" | tee "${NAME}.tar.gz.sha256"
+          SHA="$(awk '{print $1}' "${NAME}.tar.gz.sha256")"
+          echo "tarball=dist/${NAME}.tar.gz"        >> "$GITHUB_OUTPUT"
+          echo "shafile=dist/${NAME}.tar.gz.sha256" >> "$GITHUB_OUTPUT"
+          echo "tarname=${NAME}.tar.gz"             >> "$GITHUB_OUTPUT"
+          echo "sha256=${SHA}"                      >> "$GITHUB_OUTPUT"
+
+      - name: Publish to project release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          files: |
+            ${{ steps.pkg.outputs.tarball }}
+            ${{ steps.pkg.outputs.shafile }}
+          generate_release_notes: true
+
+      - name: Publish to tap release
+        env:
+          GH_TOKEN: ${{ secrets.GH_DIST_TOKEN }}
+        run: |
+          gh release create "${{ steps.tag.outputs.rel_tag }}" \
+            --repo "${{ env.TAP_REPO }}" \
+            --title "${{ env.PRODUCT }} ${{ steps.tag.outputs.tag }}" \
+            --notes "${{ env.PRODUCT }} ${{ steps.tag.outputs.tag }}" \
+            --prerelease \
+            "${{ steps.pkg.outputs.tarball }}" \
+            "${{ steps.pkg.outputs.shafile }}" \
+            || gh release upload "${{ steps.tag.outputs.rel_tag }}" \
+               --repo "${{ env.TAP_REPO }}" --clobber \
+               "${{ steps.pkg.outputs.tarball }}" \
+               "${{ steps.pkg.outputs.shafile }}"
+
+  update-formula:
+    name: Update Homebrew formula
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve tag
+        id: tag
+        run: |
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          VERSION="${TAG#v}"
+          echo "tag=$TAG"                          >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION"                  >> "$GITHUB_OUTPUT"
+          echo "rel_tag=${{ env.PRODUCT }}-${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Download SHA256 files from tap release
+        id: sha
+        env:
+          GH_TOKEN: ${{ secrets.GH_DIST_TOKEN }}
+        run: |
+          VERSION="${{ steps.tag.outputs.version }}"
+          gh release download "${{ steps.tag.outputs.rel_tag }}" \
+            --repo "${{ env.TAP_REPO }}" \
+            --pattern "*.sha256" \
+            --dir dist
+          ARM_SHA="$(awk '{print $1}' dist/${{ env.PRODUCT }}-${VERSION}-aarch64-apple-darwin.tar.gz.sha256)"
+          X86_SHA="$(awk '{print $1}' dist/${{ env.PRODUCT }}-${VERSION}-x86_64-apple-darwin.tar.gz.sha256)"
+          echo "arm_sha=${ARM_SHA}" >> "$GITHUB_OUTPUT"
+          echo "x86_sha=${X86_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Update Homebrew formula in tap repo
+        env:
+          GH_TOKEN: ${{ secrets.GH_DIST_TOKEN }}
+        run: |
+          set -eu
+          VERSION="${{ steps.tag.outputs.version }}"
+          REL_TAG="${{ steps.tag.outputs.rel_tag }}"
+          ARM_SHA="${{ steps.sha.outputs.arm_sha }}"
+          X86_SHA="${{ steps.sha.outputs.x86_sha }}"
+          BASE="https://github.com/${{ env.TAP_REPO }}/releases/download/${REL_TAG}"
+          ARM_URL="${BASE}/${{ env.PRODUCT }}-${VERSION}-aarch64-apple-darwin.tar.gz"
+          X86_URL="${BASE}/${{ env.PRODUCT }}-${VERSION}-x86_64-apple-darwin.tar.gz"
+
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/${{ env.TAP_REPO }}.git" tap
+          cd tap
+          mkdir -p Formula
+
+          cat > Formula/secretctl.rb <<FORMULA
+          class Secretctl < Formula
+            desc "Agent-first single-binary secret manager for macOS"
+            homepage "https://github.com/agent-rt/secretctl"
+            version "${VERSION}"
+            license "Apache-2.0"
+
+            on_macos do
+              on_arm do
+                url "${ARM_URL}"
+                sha256 "${ARM_SHA}"
+              end
+              on_intel do
+                url "${X86_URL}"
+                sha256 "${X86_SHA}"
+              end
+            end
+
+            def install
+              bin.install "secretctl"
+            end
+
+            test do
+              assert_match "secretctl", shell_output("#{bin}/secretctl --version")
+            end
+          end
+          FORMULA
+
+          git config user.name  "agent-rt-bot"
+          git config user.email "agent-rt-bot@users.noreply.github.com"
+          git add Formula/secretctl.rb
+          git commit -m "secretctl ${VERSION}" || { echo "formula unchanged"; exit 0; }
+          git push origin HEAD:main
