@@ -21,6 +21,7 @@ const audit_mod = @import("audit.zig");
 const editor_mod = @import("editor.zig");
 const envelope_mod = @import("envelope.zig");
 const mcp_mod = @import("mcp.zig");
+const local_auth = @import("local_auth.zig");
 
 pub const ExitCode = enum(u8) {
     success = 0,
@@ -35,7 +36,7 @@ pub const usage_text =
     \\secretctl — single-binary local secret manager
     \\
     \\USAGE:
-    \\  secretctl init [--touch-id]
+    \\  secretctl init [--no-touch-id]
     \\  secretctl add NAME [--tag X,Y] [--editor]
     \\  secretctl edit NAME
     \\  secretctl rm NAME
@@ -44,7 +45,7 @@ pub const usage_text =
     \\  secretctl render TEMPLATE --out PATH
     \\  secretctl reveal NAME
     \\  secretctl mcp [--cwd PATH] [--allow-secret-read]   # MCP server over stdio
-    \\  secretctl reinstall-keychain [--touch-id]   # rebuild keychain protector
+    \\  secretctl reinstall-keychain [--no-touch-id]   # rebuild keychain protector
     \\
     \\ENV:
     \\  $VISUAL / $EDITOR control which editor `edit` and `add --editor` launch.
@@ -88,10 +89,15 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) u8 {
 // ------- init -------
 
 fn runInit(allocator: std.mem.Allocator, args: []const []const u8) u8 {
-    var touch_id = false;
+    // Touch ID is the default when biometrics are available. Pass
+    // --no-touch-id to fall back to the trusted-app ACL (no fingerprint
+    // prompt, but every brew upgrade re-prompts "Always Allow").
+    var touch_id_flag: ?bool = null;
     for (args) |a| {
         if (std.mem.eql(u8, a, "--touch-id")) {
-            touch_id = true;
+            touch_id_flag = true;
+        } else if (std.mem.eql(u8, a, "--no-touch-id")) {
+            touch_id_flag = false;
         } else {
             tty.writeStderr("unknown init flag: ");
             tty.writeStderr(a);
@@ -146,6 +152,23 @@ fn runInit(allocator: std.mem.Allocator, args: []const []const u8) u8 {
     protector_count += 1;
 
     if (use_keychain) {
+        // Resolve effective Touch ID setting:
+        //   explicit --touch-id          → require, error if unavailable
+        //   explicit --no-touch-id       → never
+        //   batch mode (CI)              → default off (CI can't fingerprint)
+        //   interactive + biometry avail → default on
+        //   interactive + no biometry    → off
+        const touch_id = blk: {
+            if (touch_id_flag) |v| {
+                if (v and !local_auth.available()) {
+                    tty.writeStderr("--touch-id requested but Touch ID/Face ID is not available\n");
+                    return 2;
+                }
+                break :blk v;
+            }
+            if (batch) break :blk false;
+            break :blk local_auth.available();
+        };
         const flags: keychain_mod.Flags = if (touch_id) .touch_id else .default;
         const kp = keychain_mod.wrapWithFlags(allocator, &master_key, &mk_id, flags) catch |e| switch (e) {
             else => {
@@ -155,7 +178,11 @@ fn runInit(allocator: std.mem.Allocator, args: []const []const u8) u8 {
         };
         protectors[protector_count] = kp;
         protector_count += 1;
-        if (touch_id) tty.writeStderr("Touch ID protector enabled — vault unlock will require fingerprint.\n");
+        if (touch_id) {
+            tty.writeStderr("Touch ID protector enabled — vault unlock will require fingerprint.\n");
+        } else {
+            tty.writeStderr("Keychain protector enabled (passwordless via 'Always Allow').\n");
+        }
     }
 
     return finishInit(allocator, &p, &mk_id, &master_key, protectors[0..protector_count]);
@@ -927,15 +954,29 @@ fn runMcp(allocator: std.mem.Allocator, args: []const []const u8) u8 {
 // ------- reinstall-keychain -------
 
 fn runReinstallKeychain(allocator: std.mem.Allocator, args: []const []const u8) u8 {
-    var touch_id = false;
+    var touch_id_flag: ?bool = null;
     for (args) |a| {
         if (std.mem.eql(u8, a, "--touch-id")) {
-            touch_id = true;
+            touch_id_flag = true;
+        } else if (std.mem.eql(u8, a, "--no-touch-id")) {
+            touch_id_flag = false;
         } else {
-            tty.writeStderr("usage: secretctl reinstall-keychain [--touch-id]\n");
+            tty.writeStderr("usage: secretctl reinstall-keychain [--touch-id|--no-touch-id]\n");
             return 2;
         }
     }
+    const batch = c_getenv("SECRETCTL_BATCH") != null;
+    const touch_id = blk: {
+        if (touch_id_flag) |v| {
+            if (v and !local_auth.available()) {
+                tty.writeStderr("--touch-id requested but Touch ID/Face ID is not available\n");
+                return 2;
+            }
+            break :blk v;
+        }
+        if (batch) break :blk false;
+        break :blk local_auth.available();
+    };
     var p = paths_mod.resolve(allocator) catch return errExit("cannot resolve paths");
     defer p.deinit();
     if (!fsx.fileExists(p.master_key)) {
