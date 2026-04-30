@@ -21,7 +21,7 @@
       version = "0.5.1";
       # Placeholder; the release workflow patches this on every tag.
       # To bump manually: nix-prefetch-url --type sha256 <tarball-url>
-      tarballSha256 = "40b36432284896053db79e6bf85f211615027c11ce60f577ce2c294c157b0bec";
+      tarballSha256 = "9623f56f57b14162a931fee92c31649cf5ded06a7678c8782fb6e28b1b93933d";
     in
     {
       # Importable as `inputs.secretctl.homeManagerModules.default`.
@@ -43,7 +43,7 @@
             version = "0.5.1";
             src = fetchurl {
               url = "https://github.com/agent-rt/secretctl/releases/download/v0.5.1/secretctl-0.5.1-aarch64-apple-darwin.tar.gz";
-              sha256 = "40b36432284896053db79e6bf85f211615027c11ce60f577ce2c294c157b0bec";
+              sha256 = "9623f56f57b14162a931fee92c31649cf5ded06a7678c8782fb6e28b1b93933d";
             };
             dontConfigure = true;
             dontBuild = true;
