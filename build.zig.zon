@@ -1,0 +1,17 @@
+.{
+    .name = .secretctl,
+    .version = "0.1.0",
+    .fingerprint = 0xbbd194dd7fef2f83,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .vaxis = .{
+            .url = "https://github.com/rockorager/libvaxis/archive/main.tar.gz",
+            .hash = "vaxis-0.6.0-BWNV_MnUCQCAVGshfkSx9a91DRlIb4IyuFLnnzcmARHI",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
