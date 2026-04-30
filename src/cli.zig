@@ -50,6 +50,7 @@ pub const usage_text =
     \\  secretctl materialize NAME --out PATH [--mode MODE] [--mkdir]
     \\  secretctl reveal NAME
     \\  secretctl mcp [--cwd PATH] [--allow-secret-read]   # MCP server over stdio
+    \\  secretctl tag NAME X,Y[,Z]            # replace tags of a secret (doesn't re-encrypt value)
     \\  secretctl key add-keychain-protector [--no-touch-id]   # add another machine's keychain unlock path
     \\  secretctl sync                       # git pull/commit/push the vault dir
     \\  secretctl reinstall-keychain [--no-touch-id]   # rebuild keychain protector
@@ -70,7 +71,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) u8 {
         return 0;
     }
     if (std.mem.eql(u8, cmd, "--version")) {
-        tty.writeStdout("secretctl 0.4.0\n");
+        tty.writeStdout("secretctl 0.5.1\n");
         return 0;
     }
 
@@ -86,6 +87,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) u8 {
     if (std.mem.eql(u8, cmd, "reveal")) return runReveal(allocator, tail);
     if (std.mem.eql(u8, cmd, "mcp")) return runMcp(allocator, tail);
     if (std.mem.eql(u8, cmd, "key")) return runKey(allocator, tail);
+    if (std.mem.eql(u8, cmd, "tag")) return runTag(allocator, tail);
     if (std.mem.eql(u8, cmd, "sync")) return runSync(allocator, tail);
     if (std.mem.eql(u8, cmd, "reinstall-keychain")) return runReinstallKeychain(allocator, tail);
 
@@ -895,6 +897,54 @@ fn runRender(allocator: std.mem.Allocator, args: []const []const u8) u8 {
     tty.writeStdout("rendered ");
     tty.writeStdout(out_path);
     tty.writeStdout("\n");
+    return 0;
+}
+
+// ------- tag -------
+
+fn runTag(allocator: std.mem.Allocator, args: []const []const u8) u8 {
+    if (args.len != 2) {
+        tty.writeStderr("usage: secretctl tag NAME X,Y[,Z]\n");
+        return 2;
+    }
+    const name = args[0];
+    const tags_arg = args[1];
+
+    var tags: std.ArrayList([]const u8) = .empty;
+    defer tags.deinit(allocator);
+    var it = std.mem.tokenizeScalar(u8, tags_arg, ',');
+    while (it.next()) |t| {
+        const trimmed = std.mem.trim(u8, t, " \t");
+        if (trimmed.len == 0) continue;
+        tags.append(allocator, trimmed) catch return errExit("oom");
+    }
+
+    var sess = unlockSession(allocator) orelse return 1;
+    defer sess.deinit();
+
+    sess.body.setTags(allocator, name, tags.items) catch |e| switch (e) {
+        vault_mod.Error.NotFound => {
+            tty.writeStderr("secret not found: ");
+            tty.writeStderr(name);
+            tty.writeStderr("\n");
+            return 2;
+        },
+        else => return errExit("setTags failed"),
+    };
+    sess.save() catch return errExit("save failed");
+
+    audit_mod.log("tag", .cli, &.{
+        audit_mod.s("name", name),
+        audit_mod.arr("tags", tags.items),
+    });
+    tty.writeStdout("retagged ");
+    tty.writeStdout(name);
+    tty.writeStdout(" → [");
+    for (tags.items, 0..) |t, i| {
+        if (i > 0) tty.writeStdout(", ");
+        tty.writeStdout(t);
+    }
+    tty.writeStdout("]\n");
     return 0;
 }
 

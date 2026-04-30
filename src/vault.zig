@@ -161,6 +161,36 @@ pub const VaultBody = struct {
         rec.deinit(allocator);
         self.updated_at = clock.unixSeconds();
     }
+
+    /// Replace the tag list of a secret. Does not re-encrypt the value.
+    pub fn setTags(
+        self: *VaultBody,
+        allocator: std.mem.Allocator,
+        name: []const u8,
+        new_tags: []const []const u8,
+    ) Error!void {
+        const idx = self.findIndex(name) orelse return Error.NotFound;
+        var rec = &self.secrets.items[idx];
+
+        // Build new tag slice first (so we don't free the old one before allocating).
+        const new_owned = allocator.alloc([]const u8, new_tags.len) catch return Error.OutOfMemory;
+        var built: usize = 0;
+        errdefer {
+            for (new_owned[0..built]) |t| allocator.free(t);
+            allocator.free(new_owned);
+        }
+        for (new_tags) |t| {
+            new_owned[built] = allocator.dupe(u8, t) catch return Error.OutOfMemory;
+            built += 1;
+        }
+
+        // Free old tags.
+        for (rec.tags) |t| allocator.free(t);
+        allocator.free(rec.tags);
+        rec.tags = new_owned;
+        rec.updated_at = clock.unixSeconds();
+        self.updated_at = rec.updated_at;
+    }
 };
 
 fn buildOuterAad(

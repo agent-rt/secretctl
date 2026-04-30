@@ -18,7 +18,7 @@
       # nixpkgs at the time of writing). Users who want to build from source
       # can run `zig build -Doptimize=ReleaseSafe` themselves and override
       # programs.secretctl.package.
-      version = "0.4.0";
+      version = "0.5.1";
       # Placeholder; the release workflow patches this on every tag.
       # To bump manually: nix-prefetch-url --type sha256 <tarball-url>
       tarballSha256 = "40b36432284896053db79e6bf85f211615027c11ce60f577ce2c294c157b0bec";
@@ -40,9 +40,9 @@
           }:
           stdenvNoCC.mkDerivation {
             pname = "secretctl";
-            version = "0.4.0";
+            version = "0.5.1";
             src = fetchurl {
-              url = "https://github.com/agent-rt/secretctl/releases/download/v0.4.0/secretctl-0.4.0-aarch64-apple-darwin.tar.gz";
+              url = "https://github.com/agent-rt/secretctl/releases/download/v0.5.1/secretctl-0.5.1-aarch64-apple-darwin.tar.gz";
               sha256 = "40b36432284896053db79e6bf85f211615027c11ce60f577ce2c294c157b0bec";
             };
             dontConfigure = true;
