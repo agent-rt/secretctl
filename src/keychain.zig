@@ -111,9 +111,10 @@ fn keychainStore(service: []const u8, account: []const u8, value: []const u8, fl
     sf.CFDictionarySetValue(dict, @ptrCast(sf.kSecValueData), @ptrCast(cf_value));
     sf.CFDictionarySetValue(dict, @ptrCast(sf.kSecAttrAccessible), @ptrCast(sf.kSecAttrAccessibleWhenUnlocked));
 
-    // Touch ID body flag is recorded for forward compatibility; the actual
-    // biometry gate is deferred to Phase 3 (LocalAuthentication.framework
-    // before fetch). For now we always use the trusted-app ACL.
+    // The keychain item itself always carries the trusted-app ACL.
+    // Touch ID gating happens in unwrap() via LocalAuthentication.framework
+    // before SecItemCopyMatching is called — the body's `flags` byte tells
+    // the unwrap path whether to issue that LA prompt.
     _ = flags;
     const access_ref = buildSelfTrustedAccess();
     defer if (access_ref) |ar| sf.CFRelease(ar);

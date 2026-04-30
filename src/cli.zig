@@ -155,7 +155,7 @@ fn runInit(allocator: std.mem.Allocator, args: []const []const u8) u8 {
         };
         protectors[protector_count] = kp;
         protector_count += 1;
-        if (touch_id) tty.writeStderr("--touch-id recorded; biometric gating ships in Phase 3 (LocalAuthentication).\n");
+        if (touch_id) tty.writeStderr("Touch ID protector enabled — vault unlock will require fingerprint.\n");
     }
 
     return finishInit(allocator, &p, &mk_id, &master_key, protectors[0..protector_count]);
@@ -982,9 +982,8 @@ fn runReinstallKeychain(allocator: std.mem.Allocator, args: []const []const u8) 
         pr.* = .{ .id = undefined, .type_id = 0, .created_at = 0, .body = &.{} };
     }
 
-    // Create a fresh Keychain protector with the correct trusted-app ACL.
-    // (The --touch-id body flag is recorded for forward compatibility but the
-    // actual biometry prompt is deferred to Phase 3.)
+    // Create a fresh Keychain protector. The --touch-id body flag tells
+    // unwrap() to gate the fetch on a Touch ID prompt (LocalAuthentication).
     const flags: keychain_mod.Flags = if (touch_id) .touch_id else .default;
     const new_kp = keychain_mod.wrapWithFlags(allocator, &master_key, &parsed.master_key_id, flags) catch |e| switch (e) {
         else => {
@@ -1008,9 +1007,8 @@ fn runReinstallKeychain(allocator: std.mem.Allocator, args: []const []const u8) 
 
     audit_mod.log("reinstall-keychain", .cli, &.{audit_mod.b("touch_id", touch_id)});
     if (touch_id) {
-        tty.writeStdout("Keychain protector rebuilt. The --touch-id flag is recorded but\n");
-        tty.writeStdout("biometric gating is deferred to Phase 3 — for now unlock still uses\n");
-        tty.writeStdout("the trusted-app ACL. Click \"Always Allow\" on the first prompt.\n");
+        tty.writeStdout("Keychain protector rebuilt with Touch ID. The next vault access will\n");
+        tty.writeStdout("trigger a fingerprint prompt; cancel falls back to passphrase.\n");
     } else {
         tty.writeStdout("Keychain protector rebuilt. The next access will prompt once;\n");
         tty.writeStdout("click \"Always Allow\" to suppress future prompts for this binary.\n");
