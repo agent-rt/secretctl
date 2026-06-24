@@ -46,7 +46,9 @@ pub const usage_text =
     \\  secretctl edit NAME
     \\  secretctl rm NAME
     \\  secretctl list [--json] [--tag X]
-    \\  secretctl exec [--tag X] [--only N1,N2] -- COMMAND ARGS...
+    \\  secretctl exec [--tag X] [--only N1,N2] [--raw-env-names] -- COMMAND ARGS...
+    \\      # secrets inject as env vars; names are normalized to UPPER_SNAKE_CASE
+    \\      # (e.g. my-api-key -> MY_API_KEY). --raw-env-names keeps them verbatim.
     \\  secretctl render TEMPLATE --out PATH
     \\  secretctl materialize NAME --out PATH [--mode MODE] [--mkdir]
     \\  secretctl reveal NAME
@@ -699,11 +701,36 @@ extern "c" fn _exit(status: c_int) noreturn;
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 extern "c" fn getcwd(buf: [*]u8, size: usize) ?[*]u8;
 
+/// Normalize a vault secret name into a canonical environment-variable name:
+/// ASCII letters uppercased, digits kept, every other byte (including '-' and
+/// '.') replaced with '_'. A leading digit gets an '_' prefix so the result is
+/// a valid POSIX identifier (`[A-Za-z_][A-Za-z0-9_]*`). Caller owns the
+/// returned NUL-terminated slice.
+fn envNameFromSecret(allocator: std.mem.Allocator, name: []const u8) error{ OutOfMemory, EmptyName }![:0]u8 {
+    if (name.len == 0) return error.EmptyName;
+    const lead_digit = name[0] >= '0' and name[0] <= '9';
+    const extra: usize = if (lead_digit) 1 else 0;
+    const out = try allocator.allocSentinel(u8, name.len + extra, 0);
+    var w: usize = 0;
+    if (lead_digit) {
+        out[w] = '_';
+        w += 1;
+    }
+    for (name) |c| {
+        const uc: u8 = if (c >= 'a' and c <= 'z') c - 32 else c;
+        const ok = (uc >= 'A' and uc <= 'Z') or (uc >= '0' and uc <= '9') or uc == '_';
+        out[w] = if (ok) uc else '_';
+        w += 1;
+    }
+    return out;
+}
+
 fn runExec(allocator: std.mem.Allocator, args: []const []const u8) u8 {
     var tag_filter = std.ArrayList([]const u8).empty;
     defer tag_filter.deinit(allocator);
     var only_filter = std.ArrayList([]const u8).empty;
     defer only_filter.deinit(allocator);
+    var raw_env_names = false;
 
     var i: usize = 0;
     var dash_dash: ?usize = null;
@@ -712,7 +739,9 @@ fn runExec(allocator: std.mem.Allocator, args: []const []const u8) u8 {
             dash_dash = i;
             break;
         }
-        if (std.mem.eql(u8, args[i], "--tag")) {
+        if (std.mem.eql(u8, args[i], "--raw-env-names")) {
+            raw_env_names = true;
+        } else if (std.mem.eql(u8, args[i], "--tag")) {
             i += 1;
             if (i >= args.len) {
                 tty.writeStderr("--tag requires a value\n");
@@ -829,15 +858,49 @@ fn runExec(allocator: std.mem.Allocator, args: []const []const u8) u8 {
         for (pts.items) |*pt| pt.deinit();
         pts.deinit(allocator);
     }
+    // Track the env var names already injected this run so we can reject two
+    // secrets that map to the same name (a real risk once names are
+    // normalized, e.g. `foo-bar` and `foo_bar`). Owns the name allocations.
+    var env_names = std.ArrayList([:0]u8).empty;
+    defer {
+        for (env_names.items) |n| allocator.free(n);
+        env_names.deinit(allocator);
+    }
     for (selected.items) |idx| {
         const rec = sess.body.secrets.items[idx];
         const pt = envelope_mod.decrypt(allocator, &sess.master_key, &sess.master_key_id, &rec.id, &rec.envelope) catch return errExit("decrypt failed");
         pts.append(allocator, pt) catch return errExit("oom");
 
-        // Place into env (must be NUL-terminated for libc setenv).
-        const name_z = allocator.allocSentinel(u8, rec.name.len, 0) catch return errExit("oom");
-        @memcpy(name_z, rec.name);
-        defer allocator.free(name_z);
+        // Derive the env var name. By default normalize to UPPER_SNAKE_CASE so
+        // injected names are consistent and shell-valid regardless of how the
+        // vault key was cased/punctuated; --raw-env-names keeps it verbatim.
+        const name_z: [:0]u8 = if (raw_env_names) blk: {
+            const z = allocator.allocSentinel(u8, rec.name.len, 0) catch return errExit("oom");
+            @memcpy(z, rec.name);
+            break :blk z;
+        } else envNameFromSecret(allocator, rec.name) catch |e| switch (e) {
+            error.OutOfMemory => return errExit("oom"),
+            error.EmptyName => {
+                tty.writeStderr("secret has an empty name; cannot derive an env var\n");
+                return 2;
+            },
+        };
+
+        for (env_names.items) |existing| {
+            if (std.mem.eql(u8, existing, name_z)) {
+                tty.writeStderr("two selected secrets map to the same env var '");
+                tty.writeStderr(name_z);
+                tty.writeStderr("'; rename one or pass --raw-env-names\n");
+                allocator.free(name_z);
+                return 2;
+            }
+        }
+        env_names.append(allocator, name_z) catch {
+            allocator.free(name_z);
+            return errExit("oom");
+        };
+
+        // Value must be NUL-terminated for libc setenv.
         const value_z = allocator.allocSentinel(u8, pt.bytes.len, 0) catch return errExit("oom");
         @memcpy(value_z, pt.bytes);
         defer allocator.free(value_z);
@@ -1558,4 +1621,31 @@ fn errExit(msg: []const u8) u8 {
     tty.writeStderr(msg);
     tty.writeStderr("\n");
     return 1;
+}
+
+const testing = std.testing;
+
+test "envNameFromSecret normalizes case and separators" {
+    const cases = .{
+        .{ "service_token", "SERVICE_TOKEN" },
+        .{ "my-api-key", "MY_API_KEY" },
+        .{ "ALREADY_UPPER", "ALREADY_UPPER" },
+        .{ "cloud_access_key_id", "CLOUD_ACCESS_KEY_ID" },
+        .{ "db.host-name", "DB_HOST_NAME" },
+    };
+    inline for (cases) |c| {
+        const got = try envNameFromSecret(testing.allocator, c[0]);
+        defer testing.allocator.free(got);
+        try testing.expectEqualStrings(c[1], got);
+    }
+}
+
+test "envNameFromSecret prefixes a leading digit" {
+    const got = try envNameFromSecret(testing.allocator, "1service");
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings("_1SERVICE", got);
+}
+
+test "envNameFromSecret rejects empty name" {
+    try testing.expectError(error.EmptyName, envNameFromSecret(testing.allocator, ""));
 }
