@@ -472,6 +472,11 @@ fn runAdd(allocator: std.mem.Allocator, args: []const []const u8) u8 {
     var pt: mem_util.Plaintext = undefined;
     var tags_storage = std.ArrayList([]const u8).empty;
     defer tags_storage.deinit(allocator);
+    // When tags come from the interactive prompt they are heap copies owned
+    // here; CLI (--tag) tags are borrowed slices into argv. Free the copies on
+    // exit. (LIFO: this runs before tags_storage.deinit above.)
+    var tags_owned = false;
+    defer if (tags_owned) for (tags_storage.items) |t| allocator.free(t);
 
     if (use_editor) {
         pt = editor_mod.editPlaintext(allocator, null) catch |e| {
@@ -495,16 +500,24 @@ fn runAdd(allocator: std.mem.Allocator, args: []const []const u8) u8 {
             error.Cancelled => return 1,
             else => return errExit("input failed"),
         };
-        // Move ownership of value out of entry; tags need conversion to const.
+        // Move the value out of entry; copy tags into our own storage so
+        // ownership is clean: tags_storage owns the copies (freed via the
+        // tags_owned defer) and entry frees everything it allocated.
         pt = entry.value;
         entry.value = mem_util.Plaintext.fromOwnedSlice(allocator, &.{}); // sentinel so deinit is cheap
-        for (entry.tags) |t| tags_storage.append(allocator, t) catch return errExit("oom");
-        // Detach tag ownership from entry so it doesn't free them.
-        const tag_buf = entry.tags;
-        entry.tags = &.{};
+        tags_owned = true;
+        for (entry.tags) |t| {
+            const dup = allocator.dupe(u8, t) catch {
+                entry.deinit();
+                return errExit("oom");
+            };
+            tags_storage.append(allocator, dup) catch {
+                allocator.free(dup);
+                entry.deinit();
+                return errExit("oom");
+            };
+        }
         entry.deinit();
-        // tag_buf is now leaked structurally; free the outer slice (items already moved as []const u8 view).
-        allocator.free(tag_buf);
     }
     defer pt.deinit();
 
@@ -523,11 +536,6 @@ fn runAdd(allocator: std.mem.Allocator, args: []const []const u8) u8 {
         },
         else => return errExit("addSecret failed"),
     };
-
-    // tags_storage holds either CLI-arg slices (borrowed from argv) or pointers
-    // to bytes owned by entry.tags freed above. The only ones we own and must
-    // free are the duplicates from edit_view; those were already freed via the
-    // detach trick. CLI tags are slices into argv → no free needed.
 
     sess.save() catch return errExit("save failed");
 
