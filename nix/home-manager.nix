@@ -16,11 +16,11 @@
 #   programs.secretctl = {
 #     enable = true;
 #     envSecrets = {
-#       GITHUB_TOKEN = {};
-#       GH_PACKAGES_TOKEN = { secretName = "github_packages_token"; };
+#       API_TOKEN = {};
+#       DEPLOY_TOKEN = { secretName = "ci_deploy_token"; };  # env var name != vault name
 #     };
 #     fileSecrets = {
-#       SSH_KEY_WORK = { path = ".ssh/work"; mode = "0600"; };
+#       SSH_PRIVATE_KEY = { path = ".ssh/id_ed25519"; mode = "0600"; };
 #     };
 #   };
 #
@@ -81,13 +81,18 @@ let
     p:
     if lib.hasPrefix "/" p then p else "${config.home.homeDirectory}/${p}";
 
+  # home.sessionVariables don't reach the activation script, so enable the
+  # key-cache agent inline here too: the first materialize unlocks (one Touch
+  # ID), and the rest of this activation's secrets reuse the cached key.
+  agentEnv = lib.optionalString cfg.agent.enable "SECRETCTL_AGENT=1 SECRETCTL_AGENT_TTL=${toString cfg.agent.ttl} ";
+
   materializeCmd =
     name: outPath: mode: mkdirFlag:
     let
       mkdir = lib.optionalString mkdirFlag " --mkdir";
     in
     ''
-      ${cfg.package}/bin/secretctl materialize ${lib.escapeShellArg name} \
+      ${agentEnv}${cfg.package}/bin/secretctl materialize ${lib.escapeShellArg name} \
         --out ${lib.escapeShellArg outPath} \
         --mode ${mode}${mkdir} || \
         echo "secretctl: materialize ${name} failed (vault locked?)" >&2
@@ -142,7 +147,7 @@ in
       type = lib.types.attrsOf envSecretType;
       default = { };
       example = lib.literalExpression ''
-        { GITHUB_TOKEN = {}; OPENAI_API_KEY = {}; }
+        { API_TOKEN = {}; SERVICE_API_KEY = {}; }
       '';
       description = ''
         Secrets that should be materialized to per-var files and exposed
@@ -154,7 +159,7 @@ in
       type = lib.types.attrsOf fileSecretType;
       default = { };
       example = lib.literalExpression ''
-        { SSH_KEY_WORK = { path = ".ssh/work"; mode = "0600"; }; }
+        { SSH_PRIVATE_KEY = { path = ".ssh/id_ed25519"; mode = "0600"; }; }
       '';
       description = ''
         Secrets that should be materialized to specific paths with custom
@@ -167,10 +172,34 @@ in
       default = "${config.home.homeDirectory}/.config/secretctl/env.sh";
       description = "Where the sourceable env.sh is written.";
     };
+
+    agent = {
+      enable = lib.mkEnableOption ''
+        the secretctl key-cache agent. Sets $SECRETCTL_AGENT so the first
+        unlock (Touch ID / password) caches the master key in a background
+        agent and subsequent commands — including `list` — skip the prompt
+        for the TTL window. The key lives only in the agent's RAM; secret
+        names stay encrypted at rest
+      '';
+
+      ttl = lib.mkOption {
+        type = lib.types.ints.between 1 3600;
+        default = 300;
+        description = ''
+          Sliding cache lifetime in seconds (reset on each use). Capped at
+          3600 by secretctl itself. Sets $SECRETCTL_AGENT_TTL.
+        '';
+      };
+    };
   };
 
   config = lib.mkIf cfg.enable {
     home.packages = [ cfg.package ];
+
+    home.sessionVariables = lib.mkIf cfg.agent.enable {
+      SECRETCTL_AGENT = "1";
+      SECRETCTL_AGENT_TTL = toString cfg.agent.ttl;
+    };
 
     home.file.".config/secretctl/env.sh" = lib.mkIf (cfg.envSecrets != { }) {
       source = envShellFile;
