@@ -78,7 +78,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) u8 {
         return 0;
     }
     if (std.mem.eql(u8, cmd, "--version")) {
-        tty.writeStdout("secretctl 0.6.0\n");
+        tty.writeStdout("secretctl 0.6.1\n");
         return 0;
     }
 
@@ -283,6 +283,10 @@ fn unlockSession(allocator: std.mem.Allocator) ?Session {
     var master_key: [aes.key_len]u8 = undefined;
     var attempt: u32 = 0;
     var unlocked = false;
+    // Set if the keychain item exists but its trusted-app ACL is stale (the
+    // binary changed, e.g. brew upgrade). Triggers a self-heal after the
+    // passphrase fallback so future unlocks are prompt-free.
+    var kc_stale = false;
 
     // master_key_id is stored in plaintext in the master.key header (offset
     // 10, 16 bytes) — read it without unlocking so the agent can be keyed by
@@ -299,7 +303,7 @@ fn unlockSession(allocator: std.mem.Allocator) ?Session {
     }
 
     // First try: keychain only (no password prompt).
-    var parsed = master_key_mod.parseAndUnlock(allocator, blob, null, &master_key) catch |e| switch (e) {
+    var parsed = master_key_mod.parseAndUnlock(allocator, blob, null, &master_key, &kc_stale) catch |e| switch (e) {
         master_key_mod.Error.AuthenticationFailed,
         master_key_mod.Error.NoUsableProtector,
         => null_block: {
@@ -315,7 +319,7 @@ fn unlockSession(allocator: std.mem.Allocator) ?Session {
         while (attempt < 3) : (attempt += 1) {
             var pw = tty.readPassword(allocator, "Master password: ") catch return null;
             defer pw.deinit();
-            const result = master_key_mod.parseAndUnlock(allocator, blob, pw.bytes, &master_key) catch |e| switch (e) {
+            const result = master_key_mod.parseAndUnlock(allocator, blob, pw.bytes, &master_key, null) catch |e| switch (e) {
                 master_key_mod.Error.AuthenticationFailed => {
                     tty.writeStderr("incorrect password\n");
                     continue;
@@ -331,6 +335,11 @@ fn unlockSession(allocator: std.mem.Allocator) ?Session {
         return null;
     };
     if (!unlocked) unlocked = true;
+
+    // Keychain item was found ACL-stale (binary changed) and we unlocked via
+    // passphrase — re-establish the protector so it trusts the current binary.
+    if (kc_stale) healKeychainProtector(allocator, p.master_key, &parsed, &master_key);
+
     parsed.deinit(allocator);
 
     // Fresh unlock succeeded — cache the key so the next command can skip the
@@ -338,6 +347,50 @@ fn unlockSession(allocator: std.mem.Allocator) ?Session {
     if (use_agent) agent_mod.cachePut(&mk_id_hdr, &master_key, agent_mod.ttlSeconds());
 
     return finishUnlock(allocator, p, &master_key, &ok);
+}
+
+/// Re-establish the keychain protector so its Keychain item's trusted-app ACL
+/// trusts the currently-running binary. Runs automatically after a passphrase
+/// unlock when the existing item was found ACL-stale (e.g. a `brew upgrade`
+/// replaced the binary). Best-effort: any failure is non-fatal (the unlock
+/// already succeeded). NOTE: drops all keychain protectors and adds one for
+/// this machine — correct for a single-keychain-protector vault; revisit if
+/// per-Mac keychain protectors are added.
+fn healKeychainProtector(
+    allocator: std.mem.Allocator,
+    master_key_path: []const u8,
+    parsed: *master_key_mod.MasterFile,
+    master_key: *const [aes.key_len]u8,
+) void {
+    keychain_mod.deleteFor(&parsed.master_key_id) catch {};
+
+    var kept = std.ArrayList(protector_mod.Protector).empty;
+    defer {
+        for (kept.items) |*pr| pr.deinit(allocator);
+        kept.deinit(allocator);
+    }
+    // Keep non-keychain protectors; move ownership out of parsed so its later
+    // deinit doesn't double-free.
+    for (parsed.protectors) |*pr| {
+        if (pr.type_id == @intFromEnum(protector_mod.ProtectorType.macos_keychain)) continue;
+        kept.append(allocator, pr.*) catch return;
+        pr.* = .{ .id = undefined, .type_id = 0, .created_at = 0, .body = &.{} };
+    }
+
+    const flags: keychain_mod.Flags = if (local_auth.available()) .touch_id else .default;
+    const new_kp = keychain_mod.wrapWithFlags(allocator, master_key, &parsed.master_key_id, flags) catch return;
+    kept.append(allocator, new_kp) catch return;
+
+    const new_file: master_key_mod.MasterFile = .{
+        .master_key_id = parsed.master_key_id,
+        .master_key_version = parsed.master_key_version,
+        .protectors = kept.items,
+    };
+    const new_blob = master_key_mod.serialize(allocator, &new_file, master_key) catch return;
+    defer allocator.free(new_blob);
+    fsx.writeAllAtomic(master_key_path, new_blob, 0o600) catch return;
+
+    tty.writeStderr("secretctl: keychain protector re-established for this binary; future unlocks won't prompt.\n");
 }
 
 /// Load the vault with an already-unlocked master key and build the Session.
@@ -1311,7 +1364,7 @@ fn runKeyAddKeychainProtector(allocator: std.mem.Allocator, args: []const []cons
     defer mem_util.secureZero(u8, &master_key);
 
     // Try silent keychain unwrap first; fall back to password.
-    var parsed = master_key_mod.parseAndUnlock(allocator, blob, null, &master_key) catch |e| switch (e) {
+    var parsed = master_key_mod.parseAndUnlock(allocator, blob, null, &master_key, null) catch |e| switch (e) {
         master_key_mod.Error.AuthenticationFailed,
         master_key_mod.Error.NoUsableProtector,
         => null,
@@ -1320,7 +1373,7 @@ fn runKeyAddKeychainProtector(allocator: std.mem.Allocator, args: []const []cons
         tty.writeStdout("Master password required to add a new keychain protector.\n");
         var pw = tty.readPassword(allocator, "Master password: ") catch return errExit("password input failed");
         defer pw.deinit();
-        break :blk master_key_mod.parseAndUnlock(allocator, blob, pw.bytes, &master_key) catch |e| switch (e) {
+        break :blk master_key_mod.parseAndUnlock(allocator, blob, pw.bytes, &master_key, null) catch |e| switch (e) {
             master_key_mod.Error.AuthenticationFailed => {
                 tty.writeStderr("incorrect password\n");
                 return 1;
@@ -1551,7 +1604,7 @@ fn runReinstallKeychain(allocator: std.mem.Allocator, args: []const []const u8) 
     defer pw.deinit();
 
     var master_key: [aes.key_len]u8 = undefined;
-    var parsed = master_key_mod.parseAndUnlock(allocator, blob, pw.bytes, &master_key) catch |e| switch (e) {
+    var parsed = master_key_mod.parseAndUnlock(allocator, blob, pw.bytes, &master_key, null) catch |e| switch (e) {
         master_key_mod.Error.AuthenticationFailed => {
             tty.writeStderr("incorrect password\n");
             return 1;

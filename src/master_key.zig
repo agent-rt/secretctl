@@ -120,6 +120,10 @@ pub fn parseAndUnlock(
     blob: []const u8,
     password: ?[]const u8,
     out_master_key: *[aes.key_len]u8,
+    /// Set to true if a keychain protector's item exists but its trusted-app
+    /// ACL is stale (read suppressed). Lets the caller heal it. Pass null if
+    /// not interested.
+    keychain_stale: ?*bool,
 ) Error!MasterFile {
     if (blob.len < magic.len + 2 + 16 + 4 + 4 + 32) return Error.Truncated;
     if (!std.mem.eql(u8, blob[0..magic.len], magic)) return Error.BadMagic;
@@ -205,7 +209,10 @@ pub fn parseAndUnlock(
                     @memcpy(out_master_key, &probe);
                     mem_util.secureZero(u8, &probe);
                     unlocked = true;
-                } else |_| {
+                } else |err| {
+                    if (err == keychain_mod.Error.InteractionRequired) {
+                        if (keychain_stale) |ks| ks.* = true;
+                    }
                     if (first_err == null) first_err = Error.AuthenticationFailed;
                 }
             },
@@ -281,7 +288,7 @@ test "serialize -> parseAndUnlock round-trip with passphrase" {
     defer a.free(blob);
 
     var recovered: [aes.key_len]u8 = undefined;
-    var parsed = try parseAndUnlock(a, blob, "the-password", &recovered);
+    var parsed = try parseAndUnlock(a, blob, "the-password", &recovered, null);
     defer parsed.deinit(a);
     try testing.expectEqualSlices(u8, &mk, &recovered);
     try testing.expectEqual(@as(u32, 1), parsed.master_key_version);
@@ -308,7 +315,7 @@ test "wrong password rejected" {
     defer a.free(blob);
 
     var recovered: [aes.key_len]u8 = undefined;
-    try testing.expectError(Error.AuthenticationFailed, parseAndUnlock(a, blob, "wrong", &recovered));
+    try testing.expectError(Error.AuthenticationFailed, parseAndUnlock(a, blob, "wrong", &recovered, null));
 }
 
 test "tampered HMAC detected" {
@@ -335,5 +342,5 @@ test "tampered HMAC detected" {
     blob[blob.len - 1] ^= 0x01;
 
     var recovered: [aes.key_len]u8 = undefined;
-    try testing.expectError(Error.HmacMismatch, parseAndUnlock(a, blob, "pw", &recovered));
+    try testing.expectError(Error.HmacMismatch, parseAndUnlock(a, blob, "pw", &recovered, null));
 }
