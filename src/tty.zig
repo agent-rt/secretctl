@@ -101,10 +101,22 @@ pub fn readLine(allocator: std.mem.Allocator, max_len: usize) ReadError![]u8 {
     return buf.toOwnedSlice(allocator);
 }
 
-/// Read a password. stdin must be a tty. Echo is suppressed and the buffer
-/// is returned as a Plaintext that securely zeros on deinit. Newline ends
-/// the input; backspace deletes the previous byte; Ctrl-C/Ctrl-D cancel.
+/// Read a password. stdin must be a tty. Echo is suppressed entirely (no
+/// length is leaked on screen) and the buffer is returned as a Plaintext that
+/// securely zeros on deinit. Newline ends the input; backspace deletes the
+/// previous byte; Ctrl-C/Ctrl-D cancel.
 pub fn readPassword(allocator: std.mem.Allocator, prompt: []const u8) ReadError!mem_util.Plaintext {
+    return readSecret(allocator, prompt, false);
+}
+
+/// Like readPassword, but echoes a '*' per character so the user gets visual
+/// confirmation that input (e.g. a pasted value) was received. Used for the
+/// secret-value prompt where feedback matters more than hiding length.
+pub fn readMasked(allocator: std.mem.Allocator, prompt: []const u8) ReadError!mem_util.Plaintext {
+    return readSecret(allocator, prompt, true);
+}
+
+fn readSecret(allocator: std.mem.Allocator, prompt: []const u8, mask: bool) ReadError!mem_util.Plaintext {
     if (batchMode()) {
         const line = try readLine(allocator, 4096);
         return mem_util.Plaintext.fromOwnedSlice(allocator, line);
@@ -137,11 +149,14 @@ pub fn readPassword(allocator: std.mem.Allocator, prompt: []const u8) ReadError!
             if (buf.items.len > 0) {
                 buf.items[buf.items.len - 1] = 0;
                 _ = buf.pop();
+                // Erase one mask glyph: back up, overwrite with space, back up.
+                if (mask) writeStdout("\x08 \x08");
             }
             continue;
         }
         if (buf.items.len >= 4096) return ReadError.LineTooLong;
         buf.append(allocator, c[0]) catch return ReadError.OutOfMemory;
+        if (mask) writeStdout("*");
     }
     writeStdout("\n");
     const owned = buf.toOwnedSlice(allocator) catch return ReadError.OutOfMemory;
