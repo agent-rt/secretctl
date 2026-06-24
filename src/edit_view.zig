@@ -39,7 +39,8 @@ pub fn prompt(
     var name_buf: [128]u8 = undefined;
     const name_line = std.fmt.bufPrint(&name_buf, "Name:        {s}\n", .{name}) catch name;
     tty.writeStdout(name_line);
-    var value = try tty.readPassword(allocator, "Value:       ");
+    // Masked echo ('*' per char) so a pasted value visibly registers.
+    var value = try tty.readMasked(allocator, "Value:       ");
 
     // If the CLI already supplied tags, skip prompting; otherwise ask.
     var tags_owned: std.ArrayList([]u8) = .empty;
