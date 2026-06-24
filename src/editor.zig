@@ -20,17 +20,16 @@ extern "c" fn write(fd: c_int, buf: [*]const u8, count: usize) isize;
 extern "c" fn fsync(fd: c_int) c_int;
 extern "c" fn ftruncate(fd: c_int, length: i64) c_int;
 extern "c" fn unlink(path: [*:0]const u8) c_int;
-extern "c" fn lseek(fd: c_int, offset: i64, whence: c_int) i64;
 extern "c" fn fork() c_int;
 extern "c" fn waitpid(pid: c_int, stat_loc: *c_int, options: c_int) c_int;
 extern "c" fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
 extern "c" fn _exit(status: c_int) noreturn;
 extern "c" fn getpid() c_int;
 
+const O_RDONLY: c_int = 0x0000;
 const O_RDWR: c_int = 0x0002;
 const O_CREAT: c_int = 0x0200;
 const O_EXCL: c_int = 0x0800;
-const SEEK_SET: c_int = 0;
 
 pub const Error = error{
     OutOfMemory,
@@ -146,8 +145,16 @@ pub fn editPlaintext(allocator: std.mem.Allocator, initial: ?[]const u8) Error!m
     if (waitpid(pid, &status, 0) < 0) return Error.EditorFailed;
     if ((status & 0x7f) != 0 or ((status >> 8) & 0xff) != 0) return Error.EditorFailed;
 
-    // Re-read file from start.
-    if (lseek(fd, 0, SEEK_SET) < 0) return Error.ReadFailed;
+    // Re-open the file by path rather than reading the fd we held open.
+    // Editors like vim/helix save atomically (write a new file, rename it
+    // over the target), so our original fd points at an orphaned, empty
+    // inode after a save. Opening the path again gives the real content.
+    const rfd = open(cpath, O_RDONLY);
+    if (rfd < 0) return Error.ReadFailed;
+    var rfd_open = true;
+    defer if (rfd_open) {
+        _ = close(rfd);
+    };
 
     // Determine size by reading until EOF.
     var content: std.ArrayList(u8) = .empty;
@@ -157,7 +164,7 @@ pub fn editPlaintext(allocator: std.mem.Allocator, initial: ?[]const u8) Error!m
     }
     var chunk: [4096]u8 = undefined;
     while (true) {
-        const n = read(fd, &chunk, chunk.len);
+        const n = read(rfd, &chunk, chunk.len);
         if (n < 0) return Error.ReadFailed;
         if (n == 0) break;
         content.appendSlice(allocator, chunk[0..@intCast(n)]) catch return Error.OutOfMemory;
@@ -165,6 +172,11 @@ pub fn editPlaintext(allocator: std.mem.Allocator, initial: ?[]const u8) Error!m
     mem_util.secureZero(u8, &chunk);
 
     // Truncate + unlink to wipe disk-side bytes ASAP (best effort on APFS).
+    // Truncate via the read fd (the inode actually holding the content) and
+    // also via the original fd (the orphaned inode, if the editor renamed).
+    _ = ftruncate(rfd, 0);
+    _ = close(rfd);
+    rfd_open = false;
     _ = ftruncate(fd, 0);
     _ = unlink(cpath);
     must_unlink = false;
@@ -187,4 +199,37 @@ test "editorBinary defaults to vi" {
     // function returns something non-empty in all conditions.
     const e = editorBinary();
     try testing.expect(e.len > 0);
+}
+
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+
+test "editPlaintext reads back atomic-save (rename) editor output, multi-line" {
+    // Simulate an editor like vim/helix that saves atomically by writing a
+    // new file and renaming it over the target. The original fd we held open
+    // is then orphaned; we must re-open the path to see the saved content.
+    const sh =
+        \\#!/bin/sh
+        \\printf 'line one\nline two\nline three\n' > "$1.new"
+        \\mv -f "$1.new" "$1"
+        \\
+    ;
+    const dir = tmpDir();
+    var pbuf: [1024]u8 = undefined;
+    const spath = try std.fmt.bufPrintZ(&pbuf, "{s}/secretctl-test-editor-{d}.sh", .{ dir, getpid() });
+    {
+        const sfd = open(spath.ptr, O_RDWR | O_CREAT | O_EXCL, @as(c_uint, 0o700));
+        try testing.expect(sfd >= 0);
+        try testing.expect(write(sfd, sh.ptr, sh.len) == @as(isize, @intCast(sh.len)));
+        _ = close(sfd);
+    }
+    defer _ = unlink(spath.ptr);
+
+    _ = setenv("VISUAL", spath.ptr, 1);
+    _ = setenv("EDITOR", spath.ptr, 1);
+
+    var pt = try editPlaintext(testing.allocator, null);
+    defer pt.deinit();
+
+    // One trailing newline is stripped; interior newlines are preserved.
+    try testing.expectEqualStrings("line one\nline two\nline three", pt.bytes);
 }
