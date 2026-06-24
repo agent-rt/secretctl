@@ -23,6 +23,7 @@ const envelope_mod = @import("envelope.zig");
 const mcp_mod = @import("mcp.zig");
 const local_auth = @import("local_auth.zig");
 const clock_mod = @import("clock.zig");
+const agent_mod = @import("agent.zig");
 extern "c" fn dup2(oldfd: c_int, newfd: c_int) c_int;
 extern "c" fn close(fd: c_int) c_int;
 extern "c" fn read(fd: c_int, buf: [*]u8, count: usize) isize;
@@ -54,9 +55,13 @@ pub const usage_text =
     \\  secretctl key add-keychain-protector [--no-touch-id]   # add another machine's keychain unlock path
     \\  secretctl sync                       # git pull/commit/push the vault dir
     \\  secretctl reinstall-keychain [--no-touch-id]   # rebuild keychain protector
+    \\  secretctl agent [run|status|stop]    # cache the unlocked key to skip repeat Touch ID
     \\
     \\ENV:
     \\  $VISUAL / $EDITOR control which editor `edit` and `add --editor` launch.
+    \\  $SECRETCTL_AGENT=1 caches the unlocked master key in a background agent
+    \\      so repeated commands skip the Touch ID prompt (auto-spawned).
+    \\  $SECRETCTL_AGENT_TTL sets the sliding cache lifetime in seconds (default 300).
     \\
 ;
 
@@ -90,6 +95,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) u8 {
     if (std.mem.eql(u8, cmd, "tag")) return runTag(allocator, tail);
     if (std.mem.eql(u8, cmd, "sync")) return runSync(allocator, tail);
     if (std.mem.eql(u8, cmd, "reinstall-keychain")) return runReinstallKeychain(allocator, tail);
+    if (std.mem.eql(u8, cmd, "agent")) return runAgent(allocator, tail);
 
     tty.writeStderr("unknown command: ");
     tty.writeStderr(cmd);
@@ -276,6 +282,20 @@ fn unlockSession(allocator: std.mem.Allocator) ?Session {
     var attempt: u32 = 0;
     var unlocked = false;
 
+    // master_key_id is stored in plaintext in the master.key header (offset
+    // 10, 16 bytes) — read it without unlocking so the agent can be keyed by
+    // it. Layout asserted in master_key.zig.
+    const use_agent = agent_mod.enabled() and blob.len >= 26;
+    var mk_id_hdr: [16]u8 = undefined;
+    if (use_agent) {
+        @memcpy(&mk_id_hdr, blob[10..26]);
+        agent_mod.ensureRunning();
+        if (agent_mod.cacheGet(&mk_id_hdr, &master_key)) {
+            // Cache hit: skip Touch ID / password entirely.
+            return finishUnlock(allocator, p, &master_key, &ok);
+        }
+    }
+
     // First try: keychain only (no password prompt).
     var parsed = master_key_mod.parseAndUnlock(allocator, blob, null, &master_key) catch |e| switch (e) {
         master_key_mod.Error.AuthenticationFailed,
@@ -311,28 +331,88 @@ fn unlockSession(allocator: std.mem.Allocator) ?Session {
     if (!unlocked) unlocked = true;
     parsed.deinit(allocator);
 
-    const vresult = vault_mod.loadFromFile(allocator, p.vault, &master_key, null) catch |e| switch (e) {
+    // Fresh unlock succeeded — cache the key so the next command can skip the
+    // Touch ID / password prompt.
+    if (use_agent) agent_mod.cachePut(&mk_id_hdr, &master_key, agent_mod.ttlSeconds());
+
+    return finishUnlock(allocator, p, &master_key, &ok);
+}
+
+/// Load the vault with an already-unlocked master key and build the Session.
+/// On success sets `ok.*` so the caller's path cleanup is skipped (ownership
+/// of `p` transfers into the returned Session). On failure zeroes the key.
+fn finishUnlock(
+    allocator: std.mem.Allocator,
+    p: paths_mod.Paths,
+    master_key: *[aes.key_len]u8,
+    ok: *bool,
+) ?Session {
+    const vresult = vault_mod.loadFromFile(allocator, p.vault, master_key, null) catch |e| switch (e) {
         vault_mod.Error.AuthenticationFailed => {
             tty.writeStderr("vault contents do not match this master key\n");
-            mem_util.secureZero(u8, &master_key);
+            mem_util.secureZero(u8, master_key);
             return null;
         },
         else => {
             tty.writeStderr("vault read failed\n");
-            mem_util.secureZero(u8, &master_key);
+            mem_util.secureZero(u8, master_key);
             return null;
         },
     };
 
-    ok = true;
+    ok.* = true;
     return Session{
         .paths = p,
-        .master_key = master_key,
+        .master_key = master_key.*,
         .master_key_id = vresult.master_key_id,
         .master_key_version = vresult.master_key_version,
         .body = vresult.body,
         .allocator = allocator,
     };
+}
+
+// ------- agent -------
+
+fn runAgent(allocator: std.mem.Allocator, args: []const []const u8) u8 {
+    _ = allocator;
+    const sub = if (args.len >= 1) args[0] else "run";
+
+    if (std.mem.eql(u8, sub, "run")) {
+        agent_mod.serve(true) catch |e| switch (e) {
+            agent_mod.ServeError.AlreadyRunning => {
+                tty.writeStderr("agent already running\n");
+                return 0;
+            },
+            else => {
+                tty.writeStderr("agent failed to start: ");
+                tty.writeStderr(@errorName(e));
+                tty.writeStderr("\n");
+                return 1;
+            },
+        };
+        return 0;
+    }
+    if (std.mem.eql(u8, sub, "status")) {
+        if (agent_mod.statusCount()) |n| {
+            var buf: [64]u8 = undefined;
+            const line = std.fmt.bufPrint(&buf, "agent running, {d} key(s) cached\n", .{n}) catch "agent running\n";
+            tty.writeStdout(line);
+        } else {
+            tty.writeStdout("agent not running\n");
+        }
+        return 0;
+    }
+    if (std.mem.eql(u8, sub, "stop")) {
+        if (agent_mod.stopRunning()) {
+            tty.writeStdout("agent stopped\n");
+        } else {
+            tty.writeStdout("agent not running\n");
+        }
+        return 0;
+    }
+
+    tty.writeStderr("usage: secretctl agent [run|status|stop]\n");
+    return 2;
 }
 
 // ------- add / rm -------
