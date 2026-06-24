@@ -17,6 +17,9 @@ pub const errSecSuccess: OSStatus = 0;
 pub const errSecItemNotFound: OSStatus = -25300;
 pub const errSecDuplicateItem: OSStatus = -25299;
 pub const errSecAuthFailed: OSStatus = -25293;
+// Returned when a query sets kSecUseAuthenticationUI=Fail but the access would
+// require user interaction (e.g. a stale trusted-app ACL prompt).
+pub const errSecInteractionNotAllowed: OSStatus = -25308;
 
 pub const kCFStringEncodingUTF8: u32 = 0x08000100;
 
@@ -65,6 +68,12 @@ pub extern "Security" const kSecAttrAccessibleWhenUnlocked: CFStringRef;
 pub extern "Security" const kSecAttrAccess: CFStringRef;
 pub extern "Security" const kSecAttrAccessControl: CFStringRef;
 pub extern "Security" const kCFBooleanTrue: CFTypeRef;
+
+// Legacy-keychain process-global toggle. With state=false, a keychain access
+// that would otherwise show the trusted-app ACL dialog instead fails with
+// errSecInteractionNotAllowed. This is what governs our SecAccess/SecTrustedApplication
+// items (kSecUseAuthenticationUI only affects the data-protection keychain).
+pub extern "Security" fn SecKeychainSetUserInteractionAllowed(state: Boolean) OSStatus;
 
 pub extern "Security" fn SecItemAdd(attributes: CFDictionaryRef, result: ?*CFTypeRef) OSStatus;
 pub extern "Security" fn SecItemCopyMatching(query: CFDictionaryRef, result: ?*CFTypeRef) OSStatus;

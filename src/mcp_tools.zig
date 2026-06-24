@@ -95,7 +95,7 @@ fn unlockSession(allocator: std.mem.Allocator) !Session {
     var master_key: [aes.key_len]u8 = undefined;
     // Try keychain unlock silently; fall back to password (read from /dev/tty
     // via tty module so we don't read from JSON-RPC stdin).
-    const keychain_attempt = master_key_mod.parseAndUnlock(allocator, blob, null, &master_key) catch |e| switch (e) {
+    const keychain_attempt = master_key_mod.parseAndUnlock(allocator, blob, null, &master_key, null) catch |e| switch (e) {
         master_key_mod.Error.AuthenticationFailed,
         master_key_mod.Error.NoUsableProtector,
         => null_block: {
@@ -109,7 +109,7 @@ fn unlockSession(allocator: std.mem.Allocator) !Session {
         tty.writeStderr("master password (mcp unlock): ");
         var pw = try tty.readPassword(allocator, "");
         defer pw.deinit();
-        break :blk try master_key_mod.parseAndUnlock(allocator, blob, pw.bytes, &master_key);
+        break :blk try master_key_mod.parseAndUnlock(allocator, blob, pw.bytes, &master_key, null);
     };
     errdefer parsed.deinit(allocator);
 

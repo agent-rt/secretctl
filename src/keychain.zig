@@ -17,12 +17,17 @@ const rand = @import("rand.zig");
 const clock = @import("clock.zig");
 const protector = @import("protector.zig");
 const local_auth = @import("local_auth.zig");
+const tty = @import("tty.zig");
 
 pub const Error = error{
     OutOfMemory,
     KeychainError,
     KeychainItemNotFound,
     AuthenticationFailed,
+    // The item exists but reading it would require user interaction (a stale
+    // trusted-app ACL prompt) that we suppressed. Signals the caller to fall
+    // back to passphrase and then heal the keychain protector.
+    InteractionRequired,
     MalformedBody,
     Unexpected,
 };
@@ -153,9 +158,29 @@ fn keychainFetch(allocator: std.mem.Allocator, service: []const u8, account: []c
     sf.CFDictionarySetValue(query, @ptrCast(sf.kSecReturnData), @ptrCast(sf.kCFBooleanTrue));
     sf.CFDictionarySetValue(query, @ptrCast(sf.kSecMatchLimit), @ptrCast(sf.kSecMatchLimitOne));
 
+    // Interactive sessions suppress the macOS ACL password dialog: if the
+    // item's trusted-app ACL no longer matches this binary (e.g. after a
+    // `brew upgrade` replaced it), the read fails with errSecInteractionNotAllowed
+    // instead of prompting, and the caller falls back to the master password
+    // and re-establishes the protector. Non-interactive sessions (activation,
+    // MCP) keep the dialog, since they have no terminal for that fallback.
+    // NB: our items live in the legacy keychain, so the controlling knob is
+    // SecKeychainSetUserInteractionAllowed (process-global), not the
+    // kSecUseAuthenticationUI query key (data-protection keychain only).
+    const suppress_ui = tty.isStdinTty();
+    if (suppress_ui) _ = sf.SecKeychainSetUserInteractionAllowed(0);
+    defer if (suppress_ui) {
+        _ = sf.SecKeychainSetUserInteractionAllowed(1);
+    };
+
     var result: sf.CFTypeRef = null;
     const status = sf.SecItemCopyMatching(query, &result);
     if (status == sf.errSecItemNotFound) return Error.KeychainItemNotFound;
+    // With UI suppressed, any non-success result (errSecAuthFailed -25293,
+    // errSecInteractionNotAllowed -25308, …) means the access would have
+    // required the trusted-app dialog → the ACL is stale for this binary.
+    // Signal the caller to fall back to passphrase and re-establish it.
+    if (suppress_ui and status != sf.errSecSuccess) return Error.InteractionRequired;
     if (status != sf.errSecSuccess) return Error.KeychainError;
     if (result == null) return Error.KeychainError;
 
