@@ -361,6 +361,68 @@ pub fn deleteFor(master_key_id: *const [16]u8) Error!void {
     try keychainDelete(default_service, account_buf[0..]);
 }
 
+/// Write the keychain account string for a master_key_id (32 lowercase hex
+/// chars) into `out`. Matches the account used by wrap/unwrap/deleteFor.
+pub fn accountFor(master_key_id: *const [16]u8, out: *[32]u8) void {
+    hexAccount(master_key_id, out);
+}
+
+/// List the accounts of every `secretctl` generic-password item in the
+/// keychain. Caller owns the returned slice and each entry. Used to find
+/// stale wrap-key items left by past inits/upgrades.
+pub fn listAccounts(allocator: std.mem.Allocator) Error![][]u8 {
+    const cf_service = sf.cfString(default_service) orelse return Error.Unexpected;
+    defer sf.CFRelease(cf_service);
+
+    const query = sf.CFDictionaryCreateMutable(
+        sf.kCFAllocatorDefault,
+        4,
+        @ptrCast(&sf.kCFTypeDictionaryKeyCallBacks),
+        @ptrCast(&sf.kCFTypeDictionaryValueCallBacks),
+    ) orelse return Error.Unexpected;
+    defer sf.CFRelease(query);
+
+    sf.CFDictionarySetValue(query, @ptrCast(sf.kSecClass), @ptrCast(sf.kSecClassGenericPassword));
+    sf.CFDictionarySetValue(query, @ptrCast(sf.kSecAttrService), @ptrCast(cf_service));
+    sf.CFDictionarySetValue(query, @ptrCast(sf.kSecMatchLimit), @ptrCast(sf.kSecMatchLimitAll));
+    sf.CFDictionarySetValue(query, @ptrCast(sf.kSecReturnAttributes), @ptrCast(sf.kCFBooleanTrue));
+
+    var result: sf.CFTypeRef = null;
+    const status = sf.SecItemCopyMatching(query, &result);
+    if (status == sf.errSecItemNotFound) return allocator.alloc([]u8, 0);
+    if (status != sf.errSecSuccess or result == null) return Error.KeychainError;
+    defer sf.CFRelease(result);
+
+    const arr: sf.CFArrayRef = @ptrCast(result);
+    const count = sf.CFArrayGetCount(arr);
+    var out = std.ArrayList([]u8).empty;
+    errdefer {
+        for (out.items) |a| allocator.free(a);
+        out.deinit(allocator);
+    }
+    var i: sf.CFIndex = 0;
+    while (i < count) : (i += 1) {
+        const dict: sf.CFDictionaryRef = @ptrCast(@constCast(sf.CFArrayGetValueAtIndex(arr, i)));
+        if (dict == null) continue;
+        const acct_ref = sf.CFDictionaryGetValue(dict, @ptrCast(sf.kSecAttrAccount));
+        if (acct_ref == null) continue;
+        var buf: [256]u8 = undefined;
+        if (sf.CFStringGetCString(@ptrCast(@constCast(acct_ref)), &buf, buf.len, sf.kCFStringEncodingUTF8) == 0) continue;
+        const s = std.mem.sliceTo(&buf, 0);
+        const dup = allocator.dupe(u8, s) catch return Error.OutOfMemory;
+        out.append(allocator, dup) catch {
+            allocator.free(dup);
+            return Error.OutOfMemory;
+        };
+    }
+    return out.toOwnedSlice(allocator) catch Error.OutOfMemory;
+}
+
+/// Delete a `secretctl` keychain item by account string.
+pub fn deleteAccount(account: []const u8) Error!void {
+    try keychainDelete(default_service, account);
+}
+
 const testing = std.testing;
 
 test "wrap/unwrap round-trip via real Keychain" {
