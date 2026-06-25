@@ -42,7 +42,8 @@ pub const usage_text =
     \\
     \\USAGE:
     \\  secretctl init [--no-touch-id]
-    \\  secretctl add NAME [--tag X,Y] [--editor]
+    \\  secretctl add NAME [--tag X,Y] [--editor | --file PATH | --stdin]
+    \\      # --file/--stdin import exact bytes (multi-line/binary, e.g. a .p8 key)
     \\  secretctl edit NAME
     \\  secretctl rm NAME
     \\  secretctl list [--json] [--tag X]
@@ -57,6 +58,7 @@ pub const usage_text =
     \\  secretctl key add-keychain-protector [--no-touch-id]   # add another machine's keychain unlock path
     \\  secretctl sync                       # git pull/commit/push the vault dir
     \\  secretctl reinstall-keychain [--no-touch-id]   # rebuild keychain protector
+    \\  secretctl prune-keychain [--yes]     # remove stale secretctl keychain items from old vaults
     \\  secretctl agent [run|status|stop]    # cache the unlocked key to skip repeat Touch ID
     \\
     \\ENV:
@@ -78,7 +80,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) u8 {
         return 0;
     }
     if (std.mem.eql(u8, cmd, "--version")) {
-        tty.writeStdout("secretctl 0.6.1\n");
+        tty.writeStdout("secretctl 0.6.2\n");
         return 0;
     }
 
@@ -97,6 +99,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) u8 {
     if (std.mem.eql(u8, cmd, "tag")) return runTag(allocator, tail);
     if (std.mem.eql(u8, cmd, "sync")) return runSync(allocator, tail);
     if (std.mem.eql(u8, cmd, "reinstall-keychain")) return runReinstallKeychain(allocator, tail);
+    if (std.mem.eql(u8, cmd, "prune-keychain")) return runPruneKeychain(allocator, tail);
     if (std.mem.eql(u8, cmd, "agent")) return runAgent(allocator, tail);
 
     tty.writeStderr("unknown command: ");
@@ -472,6 +475,22 @@ fn runAgent(allocator: std.mem.Allocator, args: []const []const u8) u8 {
 
 // ------- add / rm -------
 
+/// Read all of stdin (binary-safe, multi-line) up to 16 MiB. Returns owned
+/// bytes the caller wraps in a Plaintext.
+fn readAllStdin(allocator: std.mem.Allocator) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    var chunk: [4096]u8 = undefined;
+    while (true) {
+        const n = read(0, &chunk, chunk.len);
+        if (n < 0) return error.ReadFailed;
+        if (n == 0) break;
+        if (buf.items.len + @as(usize, @intCast(n)) > 16 * 1024 * 1024) return error.TooLarge;
+        try buf.appendSlice(allocator, chunk[0..@intCast(n)]);
+    }
+    return buf.toOwnedSlice(allocator);
+}
+
 fn runAdd(allocator: std.mem.Allocator, args: []const []const u8) u8 {
     if (args.len == 0) {
         tty.writeStderr("usage: secretctl add NAME [--tag X,Y]\n");
@@ -486,6 +505,8 @@ fn runAdd(allocator: std.mem.Allocator, args: []const []const u8) u8 {
     var cli_tags = std.ArrayList([]const u8).empty;
     defer cli_tags.deinit(allocator);
     var use_editor = false;
+    var from_stdin = false;
+    var file_path: ?[]const u8 = null;
 
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
@@ -500,6 +521,15 @@ fn runAdd(allocator: std.mem.Allocator, args: []const []const u8) u8 {
             while (tit.next()) |t| cli_tags.append(allocator, t) catch return errExit("oom");
         } else if (std.mem.eql(u8, a, "--editor")) {
             use_editor = true;
+        } else if (std.mem.eql(u8, a, "--stdin")) {
+            from_stdin = true;
+        } else if (std.mem.eql(u8, a, "--file")) {
+            i += 1;
+            if (i >= args.len) {
+                tty.writeStderr("--file requires a path\n");
+                return 2;
+            }
+            file_path = args[i];
         } else if (std.mem.startsWith(u8, a, "--")) {
             tty.writeStderr("unknown flag: ");
             tty.writeStderr(a);
@@ -510,6 +540,35 @@ fn runAdd(allocator: std.mem.Allocator, args: []const []const u8) u8 {
             tty.writeStderr("unexpected positional argument; secret values must be entered via TUI\n");
             return 2;
         }
+    }
+
+    {
+        var modes: u8 = 0;
+        if (use_editor) modes += 1;
+        if (from_stdin) modes += 1;
+        if (file_path != null) modes += 1;
+        if (modes > 1) {
+            tty.writeStderr("--editor, --stdin and --file are mutually exclusive\n");
+            return 2;
+        }
+    }
+
+    // Capture --file/--stdin value BEFORE unlocking: a password-based unlock
+    // also reads stdin, which --stdin would otherwise have consumed. Stored as
+    // exact bytes (no newline stripping) so key files round-trip via materialize.
+    var preread: ?mem_util.Plaintext = null;
+    errdefer if (preread) |*x| x.deinit();
+    if (file_path) |fp| {
+        const bytes = fsx.readAllAlloc(allocator, fp, 16 * 1024 * 1024) catch {
+            tty.writeStderr("cannot read file: ");
+            tty.writeStderr(fp);
+            tty.writeStderr("\n");
+            return 1;
+        };
+        preread = mem_util.Plaintext.fromOwnedSlice(allocator, bytes);
+    } else if (from_stdin) {
+        const bytes = readAllStdin(allocator) catch return errExit("stdin read failed");
+        preread = mem_util.Plaintext.fromOwnedSlice(allocator, bytes);
     }
 
     var sess = unlockSession(allocator) orelse return 1;
@@ -531,7 +590,16 @@ fn runAdd(allocator: std.mem.Allocator, args: []const []const u8) u8 {
     var tags_owned = false;
     defer if (tags_owned) for (tags_storage.items) |t| allocator.free(t);
 
-    if (use_editor) {
+    if (preread) |pre| {
+        pt = pre;
+        preread = null; // ownership moved to pt
+        if (pt.bytes.len == 0) {
+            pt.deinit();
+            tty.writeStderr("empty value, aborting\n");
+            return 1;
+        }
+        for (cli_tags.items) |t| tags_storage.append(allocator, t) catch return errExit("oom");
+    } else if (use_editor) {
         pt = editor_mod.editPlaintext(allocator, null) catch |e| {
             tty.writeStderr("editor failed: ");
             tty.writeStderr(@errorName(e));
@@ -547,7 +615,7 @@ fn runAdd(allocator: std.mem.Allocator, args: []const []const u8) u8 {
     } else {
         var entry = edit_view.prompt(allocator, name, cli_tags.items) catch |e| switch (e) {
             error.NoTty => {
-                tty.writeStderr("add must run from a terminal (try --editor)\n");
+                tty.writeStderr("add must run from a terminal (try --editor, or --file PATH / --stdin to import raw bytes)\n");
                 return 2;
             },
             error.Cancelled => return 1,
@@ -1663,6 +1731,76 @@ fn runReinstallKeychain(allocator: std.mem.Allocator, args: []const []const u8) 
     } else {
         tty.writeStdout("Keychain protector rebuilt. The next access will prompt once;\n");
         tty.writeStdout("click \"Always Allow\" to suppress future prompts for this binary.\n");
+    }
+    return 0;
+}
+
+// ------- prune-keychain -------
+
+fn runPruneKeychain(allocator: std.mem.Allocator, args: []const []const u8) u8 {
+    var yes = false;
+    for (args) |a| {
+        if (std.mem.eql(u8, a, "--yes")) {
+            yes = true;
+        } else {
+            tty.writeStderr("usage: secretctl prune-keychain [--yes]\n");
+            return 2;
+        }
+    }
+
+    var p = paths_mod.resolve(allocator) catch return errExit("cannot resolve paths");
+    defer p.deinit();
+    if (!fsx.fileExists(p.master_key)) {
+        tty.writeStderr("no vault found; run `secretctl init` first\n");
+        return 1;
+    }
+    const blob = fsx.readAllAlloc(allocator, p.master_key, 1 * 1024 * 1024) catch return errExit("read master.key failed");
+    defer allocator.free(blob);
+    if (blob.len < 26) return errExit("master.key too short");
+
+    // Current vault's keychain account (read from the plaintext header).
+    var mk_id: [16]u8 = undefined;
+    @memcpy(&mk_id, blob[10..26]);
+    var keep_buf: [32]u8 = undefined;
+    keychain_mod.accountFor(&mk_id, &keep_buf);
+    const keep = keep_buf[0..];
+
+    const accounts = keychain_mod.listAccounts(allocator) catch return errExit("keychain enumeration failed");
+    defer {
+        for (accounts) |a| allocator.free(a);
+        allocator.free(accounts);
+    }
+
+    var stale: usize = 0;
+    for (accounts) |acct| {
+        if (std.mem.eql(u8, acct, keep)) continue;
+        stale += 1;
+        if (yes) {
+            keychain_mod.deleteAccount(acct) catch {
+                tty.writeStderr("  failed to delete ");
+                tty.writeStderr(acct);
+                tty.writeStderr("\n");
+                continue;
+            };
+            tty.writeStdout("deleted ");
+            tty.writeStdout(acct);
+            tty.writeStdout("\n");
+        } else {
+            tty.writeStdout("would delete ");
+            tty.writeStdout(acct);
+            tty.writeStdout("\n");
+        }
+    }
+
+    if (stale == 0) {
+        tty.writeStdout("no stale secretctl keychain items (keeping current vault).\n");
+        return 0;
+    }
+    if (yes) {
+        audit_mod.log("prune-keychain", .cli, &.{audit_mod.s("kept", keep)});
+        tty.writeStdout("done; kept the current vault's item.\n");
+    } else {
+        tty.writeStdout("\nthis is a dry run; re-run with --yes to delete the above (current vault is never touched).\n");
     }
     return 0;
 }

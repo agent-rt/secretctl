@@ -94,6 +94,15 @@ pub extern "CoreFoundation" fn CFArrayCreate(
     callBacks: ?*const anyopaque,
 ) CFArrayRef;
 pub extern "CoreFoundation" const kCFTypeArrayCallBacks: anyopaque;
+pub extern "CoreFoundation" fn CFArrayGetCount(theArray: CFArrayRef) CFIndex;
+pub extern "CoreFoundation" fn CFArrayGetValueAtIndex(theArray: CFArrayRef, idx: CFIndex) ?*const anyopaque;
+pub extern "CoreFoundation" fn CFDictionaryGetValue(theDict: CFDictionaryRef, key: ?*const anyopaque) ?*const anyopaque;
+pub extern "CoreFoundation" fn CFStringGetCString(theString: CFStringRef, buffer: [*]u8, bufferSize: CFIndex, encoding: u32) Boolean;
+
+// Enumerate all matching items: kSecMatchLimit=kSecMatchLimitAll with
+// kSecReturnAttributes returns a CFArray of CFDictionary attribute sets.
+pub extern "Security" const kSecMatchLimitAll: CFStringRef;
+pub extern "Security" const kSecReturnAttributes: CFStringRef;
 
 pub extern "Security" fn SecTrustedApplicationCreateFromPath(
     path: ?[*:0]const u8,
