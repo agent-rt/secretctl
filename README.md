@@ -144,10 +144,16 @@ what making it a real factor would take, and what it would cost.
 
 ## Status
 
-v0.6.2. macOS arm64 only. Phases 1–5a shipped: vault + CLI, MCP server,
-Touch ID–gated unlock, `materialize` + Home Manager module, and
-cross-Mac vault sync over git. See `tests/e2e.sh`, `tests/e2e_mcp.sh`,
-and `tests/e2e_sync.sh` for the behavior contract.
+v0.7.0. macOS arm64 only. Shipped: vault + CLI, MCP server, Touch ID–gated
+unlock, `materialize` + Home Manager module, cross-Mac vault sync over git,
+and out-of-band approval when the screen is locked. See `tests/e2e.sh`,
+`tests/e2e_mcp.sh`, `tests/e2e_sync.sh`, and `tests/e2e_lockstate.sh` for
+the behavior contract.
+
+The locked-screen path is verified end to end for everything that does not
+need hardware: a real screen, a real phone, and a push round trip are
+covered by `tests/manual_locked_approval.sh`, which is a script rather than
+a claim because it needs a human to tap a notification.
 
 ## License
 

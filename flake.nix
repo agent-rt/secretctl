@@ -33,7 +33,7 @@
         zig = zig-overlay.packages.${system}."0.16.0";
         secretctl = pkgs.stdenvNoCC.mkDerivation {
           pname = "secretctl";
-          version = "0.6.2";
+          version = "0.7.0";
 
           # `self` is the flake source tree. Anyone pinning to a tag, branch,
           # or commit gets exactly that source — no release tarball involved.

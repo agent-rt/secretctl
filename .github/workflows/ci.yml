@@ -20,6 +20,13 @@ jobs:
         run: zig build -Doptimize=ReleaseSafe
       - name: e2e
         run: bash tests/e2e.sh
+      # Guards the authorization gate. Depends on nothing outside the repo:
+      # it pins SECRETCTL_FORCE_LOCKED on both sides, installs no keychain
+      # protector, and reaches no network beyond a refused localhost port.
+      - name: e2e (lock state)
+        run: bash tests/e2e_lockstate.sh
+      - name: e2e (sync)
+        run: bash tests/e2e_sync.sh
 
   nix-build:
     name: nix build
