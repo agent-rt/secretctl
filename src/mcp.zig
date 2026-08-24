@@ -344,6 +344,9 @@ fn handleRequest(allocator: std.mem.Allocator, line: []const u8, opts: *const Op
 }
 
 pub fn serve(allocator: std.mem.Allocator, opts: Options) u8 {
+    // fd 0 is the JSON-RPC transport from here on. Anything that would prompt
+    // the user must fail instead of consuming protocol bytes.
+    tty.reserveStdin();
     if (opts.dangerous) {
         const local_auth = @import("local_auth.zig");
         if (!local_auth.available()) {

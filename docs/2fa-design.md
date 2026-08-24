@@ -313,16 +313,51 @@ locked-screen case is as bad as it is.
    `LAPolicyDeviceOwnerAuthentication`, which admits the Mac login password.
    Marginal for this use case — it helps over Screen Sharing, not over SSH —
    but it is a one-symbol change. *Also provisional on §1.3.*
-3. **Unreachable MCP passphrase fallback** (`mcp_tools.zig:96`, `tty.zig`).
-   Either open `/dev/tty` explicitly, as the comment already claims, or
-   delete the fallback and route through the broker (§4.1). The broker is the
-   better answer: a passphrase prompt on the MCP server's controlling
-   terminal is invisible to whoever is actually driving the agent. Fix the
-   comment either way — it currently documents behaviour the code does not
-   have.
-4. **`SECRETCTL_BATCH` corrupts the MCP stream** (`tty.zig:120`). The batch
-   branch precedes the tty check and will eat a JSON-RPC frame. Batch mode
-   should be refused, or ignored, when serving MCP.
+3. ~~**Unreachable MCP passphrase fallback**~~ — **fixed.** The fallback is
+   removed rather than repaired: there is no correct terminal for an MCP
+   server to prompt on. fd 0 is the transport, and the controlling terminal
+   belongs to whoever spawned the server, so a prompt there is invisible to
+   the operator driving the agent and reading it steals the parent's input.
+   The unlock is now keychain-only and returns `error.VaultLocked`, which
+   `errorResult` renders as instructions the agent can relay. Out-of-band
+   approval (§4.1) is the real answer.
+4. ~~**`SECRETCTL_BATCH` corrupts the MCP stream**~~ — **fixed**, at the
+   choke point rather than per-call-site: `tty.reserveStdin()` marks fd 0 as a
+   protocol transport, and both functions that read fd 0 (`readLine`,
+   `readSecret`) refuse with `ReadError.StdinReserved`. The check precedes the
+   `batchMode()` branch, which is the specific ordering bug. `mcp.serve()`
+   calls it once at startup.
+
+   This was **worse than "unreachable"**. Measured A/B against brew v0.6.2 with
+   a passphrase-only vault and `SECRETCTL_BATCH=1` (the same env `e2e_mcp.sh`
+   sets): three request frames in, only ids 1 and 2 answered — frame 3 was
+   consumed as the master password, and id 2 came back
+   `AuthenticationFailed` because a JSON line was tried as a passphrase. After
+   the fix: ids 1, 2, 3 all answered. Regression test:
+   `tests/e2e_mcp_locked.sh`, which fails on v0.6.2 at exactly that
+   assertion. `e2e_mcp.sh` could never catch it — it always sets
+   `SECRETCTL_BATCH_KEYCHAIN=1`, so the keychain unlock always succeeds and
+   the fallback is never entered.
+5. **Batch-mode stdin is positional but the number of lines consumed is not**
+   (`tty.zig:120`, `cli.zig` unlock path). *Found while verifying 3 and 4; not
+   yet fixed.* In batch mode stdin is a positional script
+   (`password\nvalue\n`), but whether the password line is read depends on
+   whether the unlock actually prompts — and a warm agent cache skips it. Then
+   line 1 shifts into the *value* slot. Measured on identical inputs:
+
+   ```
+   SECRETCTL_AGENT=0 -> GITHUB_TOKEN renders as: ghp_test-token-67890
+   SECRETCTL_AGENT=1 -> GITHUB_TOKEN renders as: hunter2hunter2   # the passphrase
+   ```
+
+   So the master password is stored as a secret value and then written in
+   plaintext into whatever `render`/`materialize` produces. This is why
+   `tests/e2e.sh` fails at "render missing GITHUB_TOKEN value" on any machine
+   where `SECRETCTL_AGENT=1` is exported — reproduced identically on brew
+   v0.6.2, so it is not a regression. Batch mode needs a framing that does not
+   depend on unlock state: read the passphrase from a dedicated channel
+   (`SECRETCTL_PASSPHRASE_FD`), or require an explicit sentinel per field
+   rather than bare line order.
 
 Also worth revisiting once §4.1 lands: the 3600 s TTL cap (`agent.zig:87`)
 exists to bound exposure of a cached key, which is the right instinct while
