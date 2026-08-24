@@ -93,8 +93,17 @@ fn unlockSession(allocator: std.mem.Allocator) !Session {
     defer allocator.free(blob);
 
     var master_key: [aes.key_len]u8 = undefined;
-    // Try keychain unlock silently; fall back to password (read from /dev/tty
-    // via tty module so we don't read from JSON-RPC stdin).
+    // Keychain-only. There is deliberately no passphrase fallback here: an MCP
+    // server has no usable interactive channel. fd 0 is the JSON-RPC transport,
+    // and the controlling terminal (if there is one) belongs to whoever spawned
+    // the server — prompting there is invisible to the operator actually driving
+    // the agent, and reading it steals the parent's input.
+    //
+    // The previous code did prompt, with a comment claiming it read /dev/tty;
+    // tty.zig has only ever read fd 0, so the branch could not succeed
+    // (isStdinTty() is false behind a pipe) and under SECRETCTL_BATCH it would
+    // have eaten a JSON-RPC frame. Warming the agent cache from a terminal is
+    // the supported path; out-of-band approval is docs/2fa-design.md §4.1.
     const keychain_attempt = master_key_mod.parseAndUnlock(allocator, blob, null, &master_key, null) catch |e| switch (e) {
         master_key_mod.Error.AuthenticationFailed,
         master_key_mod.Error.NoUsableProtector,
@@ -104,12 +113,9 @@ fn unlockSession(allocator: std.mem.Allocator) !Session {
         else => return e,
     };
 
-    var parsed: master_key_mod.MasterFile = if (keychain_attempt) |kp| kp else blk: {
-        // Need password — write prompt to stderr (stdout reserved for JSON-RPC).
-        tty.writeStderr("master password (mcp unlock): ");
-        var pw = try tty.readPassword(allocator, "");
-        defer pw.deinit();
-        break :blk try master_key_mod.parseAndUnlock(allocator, blob, pw.bytes, &master_key, null);
+    var parsed: master_key_mod.MasterFile = keychain_attempt orelse {
+        tty.writeStderr("mcp: vault locked (keychain unlock failed) and no interactive channel to ask for the master password\n");
+        return error.VaultLocked;
     };
     errdefer parsed.deinit(allocator);
 
@@ -556,6 +562,13 @@ fn errorResultMsg(allocator: std.mem.Allocator, msg: []const u8) anyerror!mcp.To
 }
 
 fn errorResult(allocator: std.mem.Allocator, e: anyerror) anyerror!mcp.ToolResult {
+    // The agent relays this text to a human, so the one error a human can
+    // actually act on gets instructions rather than a bare error name.
+    if (e == error.VaultLocked) return errorResultMsg(
+        allocator,
+        "vault is locked: the keychain unlock failed and an MCP server has no way to prompt for the master password. " ++
+            "Unlock it once in a terminal (e.g. `SECRETCTL_AGENT=1 secretctl list`) and retry — that caches the key for $SECRETCTL_AGENT_TTL seconds.",
+    );
     var msg_buf: [128]u8 = undefined;
     const msg = std.fmt.bufPrint(&msg_buf, "{s}", .{@errorName(e)}) catch "error";
     return errorResultMsg(allocator, msg);
