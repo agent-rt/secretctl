@@ -312,6 +312,9 @@ fn unlockSession(allocator: std.mem.Allocator) ?Session {
     // cache, locking the screen would leave an hour-long window needing no
     // approval at all.
     const authz_decision = authz.decide();
+    // Stays `.require_biometric` unless approval actually arrives, so every
+    // path that does not go through requestPhoneApproval keeps today's gate.
+    var gate: keychain_mod.Gate = .require_biometric;
     if (authz_decision.method == .out_of_band) {
         if (!authz.outOfBandConfigured(p.home)) {
             // Fail closed, and say which of the two things is missing: nobody
@@ -328,11 +331,13 @@ fn unlockSession(allocator: std.mem.Allocator) ?Session {
         // still has to produce it, so a stolen approval on its own is worth
         // nothing.
         //
-        // The Touch ID gate inside the keychain protector cannot be satisfied
-        // while locked, so the keychain read is attempted with the biometric
-        // prompt suppressed and falls back to the passphrase path only if one
-        // is available — which, unattended, it is not. That is why an approved
-        // request can still fail to unlock, and why the message says so.
+        // The biometric gate inside that protector cannot be satisfied while
+        // locked — measured, it fails after 13 s
+        // (`docs/2fa-push-approval.md` §2.2b) — and unattended there is no
+        // passphrase channel to fall back to either, so before this the
+        // approved request still could not unlock. Approval stands in for the
+        // gate instead; `keychain.Gate` documents why that widens nothing.
+        gate = .approved_out_of_band;
     }
 
     var master_key: [aes.key_len]u8 = undefined;
@@ -358,7 +363,7 @@ fn unlockSession(allocator: std.mem.Allocator) ?Session {
     }
 
     // First try: keychain only (no password prompt).
-    var parsed = master_key_mod.parseAndUnlock(allocator, blob, null, &master_key, &kc_stale) catch |e| switch (e) {
+    var parsed = master_key_mod.parseAndUnlock(allocator, blob, null, gate, &master_key, &kc_stale) catch |e| switch (e) {
         master_key_mod.Error.AuthenticationFailed,
         master_key_mod.Error.NoUsableProtector,
         => null_block: {
@@ -377,7 +382,7 @@ fn unlockSession(allocator: std.mem.Allocator) ?Session {
                 return null;
             };
             defer pw.deinit();
-            const result = master_key_mod.parseAndUnlock(allocator, blob, pw.bytes, &master_key, null) catch |e| switch (e) {
+            const result = master_key_mod.parseAndUnlock(allocator, blob, pw.bytes, .require_biometric, &master_key, null) catch |e| switch (e) {
                 master_key_mod.Error.AuthenticationFailed => {
                     tty.writeStderr("incorrect password\n");
                     continue;
@@ -1444,55 +1449,13 @@ fn requestPhoneApproval(
     home: []const u8,
     reason: []const u8,
 ) bool {
-    var cfg = push_auth.load(allocator, home) catch {
-        tty.writeStderr("cannot read push.json; run `secretctl 2fa status`\n");
-        return false;
-    };
-    defer cfg.deinit();
-
-    if (cfg.devices.len == 0) {
-        tty.writeStderr("no paired device; pair a phone first\n");
-        return false;
-    }
-
-    const purpose = push_auth.buildPurpose(
+    return push_auth.approveOrExplain(
         allocator,
+        home,
+        .cli,
         "secretctl · unlock vault",
         reason,
-        &.{
-            .{ "host", "this Mac" },
-            .{ "reason", reason },
-        },
-        // Releasing vault access is not a one-tap-from-a-lock-screen decision.
-        true,
-    ) catch return false;
-    defer allocator.free(purpose);
-
-    tty.writeStderr("waiting for approval on your phone…\n");
-    const verdict = push_auth.requestApproval(allocator, &cfg, purpose) catch |e| {
-        switch (e) {
-            push_auth.Error.Denied => tty.writeStderr("denied on the phone\n"),
-            push_auth.Error.Expired => tty.writeStderr("no answer before the request expired\n"),
-            push_auth.Error.ForgedVerdict => tty.writeStderr(
-                "REFUSING: the verdict was not signed by a pinned device key.\n" ++
-                "This is not a transient error. Do not retry until you know why.\n"),
-            push_auth.Error.NoPinnedDevice => tty.writeStderr("no paired device\n"),
-            else => {
-                tty.writeStderr("approval failed: ");
-                tty.writeStderr(@errorName(e));
-                tty.writeStderr("\n");
-            },
-        }
-        return false;
-    };
-
-    audit_mod.log("authz.approved", .cli, &.{
-        audit_mod.s("device", verdict.device_fingerprint),
-    });
-    tty.writeStderr("approved by ");
-    tty.writeStderr(verdict.device_fingerprint);
-    tty.writeStderr("\n");
-    return true;
+    );
 }
 
 fn runTwoFactor(allocator: std.mem.Allocator, args: []const []const u8) u8 {
@@ -1686,7 +1649,7 @@ fn runKeyAddKeychainProtector(allocator: std.mem.Allocator, args: []const []cons
     defer mem_util.secureZero(u8, &master_key);
 
     // Try silent keychain unwrap first; fall back to password.
-    var parsed = master_key_mod.parseAndUnlock(allocator, blob, null, &master_key, null) catch |e| switch (e) {
+    var parsed = master_key_mod.parseAndUnlock(allocator, blob, null, .require_biometric, &master_key, null) catch |e| switch (e) {
         master_key_mod.Error.AuthenticationFailed,
         master_key_mod.Error.NoUsableProtector,
         => null,
@@ -1698,7 +1661,7 @@ fn runKeyAddKeychainProtector(allocator: std.mem.Allocator, args: []const []cons
             else => "password input failed",
         });
         defer pw.deinit();
-        break :blk master_key_mod.parseAndUnlock(allocator, blob, pw.bytes, &master_key, null) catch |e| switch (e) {
+        break :blk master_key_mod.parseAndUnlock(allocator, blob, pw.bytes, .require_biometric, &master_key, null) catch |e| switch (e) {
             master_key_mod.Error.AuthenticationFailed => {
                 tty.writeStderr("incorrect password\n");
                 return 1;
@@ -1932,7 +1895,7 @@ fn runReinstallKeychain(allocator: std.mem.Allocator, args: []const []const u8) 
     defer pw.deinit();
 
     var master_key: [aes.key_len]u8 = undefined;
-    var parsed = master_key_mod.parseAndUnlock(allocator, blob, pw.bytes, &master_key, null) catch |e| switch (e) {
+    var parsed = master_key_mod.parseAndUnlock(allocator, blob, pw.bytes, .require_biometric, &master_key, null) catch |e| switch (e) {
         master_key_mod.Error.AuthenticationFailed => {
             tty.writeStderr("incorrect password\n");
             return 1;

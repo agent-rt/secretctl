@@ -16,6 +16,9 @@ const master_key_mod = @import("master_key.zig");
 const aes = @import("aes_gcm.zig");
 const mem_util = @import("mem.zig");
 const tty = @import("tty.zig");
+const keychain_mod = @import("keychain.zig");
+const authz = @import("authz.zig");
+const push_auth = @import("push_auth.zig");
 
 pub const list_secrets_schema =
     \\{"type":"object","properties":{"tag":{"type":"string","description":"Filter to secrets carrying this tag."}}}
@@ -92,6 +95,32 @@ fn unlockSession(allocator: std.mem.Allocator) !Session {
     const blob = try fsx.readAllAlloc(allocator, p.master_key, 1 * 1024 * 1024);
     defer allocator.free(blob);
 
+    // Which authorization applies, decided before the keychain is touched for
+    // the same reason as in `cli.openVault`. This is the case the whole
+    // out-of-band design exists for: an agent asks for a secret while nobody
+    // is at the machine, so there is no finger to offer the biometric gate.
+    var gate: keychain_mod.Gate = .require_biometric;
+    const decision = authz.decide();
+    if (decision.method == .out_of_band) {
+        if (!authz.outOfBandConfigured(p.home)) {
+            tty.writeStderr("mcp: cannot authorize: ");
+            tty.writeStderr(decision.reason);
+            tty.writeStderr("\n");
+            tty.writeStderr(authz.not_configured_hint);
+            return error.ApprovalNotConfigured;
+        }
+        // The title says an agent asked, not a person at the keyboard. That
+        // distinction is the only thing the human on the phone has to go on.
+        if (!push_auth.approveOrExplain(
+            allocator,
+            p.home,
+            .mcp,
+            "secretctl · agent wants a secret",
+            decision.reason,
+        )) return error.ApprovalRefused;
+        gate = .approved_out_of_band;
+    }
+
     var master_key: [aes.key_len]u8 = undefined;
     // Keychain-only. There is deliberately no passphrase fallback here: an MCP
     // server has no usable interactive channel. fd 0 is the JSON-RPC transport,
@@ -103,8 +132,9 @@ fn unlockSession(allocator: std.mem.Allocator) !Session {
     // tty.zig has only ever read fd 0, so the branch could not succeed
     // (isStdinTty() is false behind a pipe) and under SECRETCTL_BATCH it would
     // have eaten a JSON-RPC frame. Warming the agent cache from a terminal is
-    // the supported path; out-of-band approval is docs/2fa-design.md §4.1.
-    const keychain_attempt = master_key_mod.parseAndUnlock(allocator, blob, null, &master_key, null) catch |e| switch (e) {
+    // the supported path; approval from a phone is the unattended one, handled
+    // above.
+    const keychain_attempt = master_key_mod.parseAndUnlock(allocator, blob, null, gate, &master_key, null) catch |e| switch (e) {
         master_key_mod.Error.AuthenticationFailed,
         master_key_mod.Error.NoUsableProtector,
         => null_block: {
@@ -562,8 +592,22 @@ fn errorResultMsg(allocator: std.mem.Allocator, msg: []const u8) anyerror!mcp.To
 }
 
 fn errorResult(allocator: std.mem.Allocator, e: anyerror) anyerror!mcp.ToolResult {
-    // The agent relays this text to a human, so the one error a human can
-    // actually act on gets instructions rather than a bare error name.
+    // The agent relays this text to a human, so every error a human can act on
+    // gets instructions rather than a bare error name — and, more importantly,
+    // gets the instructions that match what actually happened. A locked screen
+    // and a broken keychain protector need opposite advice, and the cache tip
+    // below is actively wrong for a locked screen: the authorization gate sits
+    // *above* the agent cache (authz.decide), so a warm cache changes nothing.
+    if (e == error.ApprovalNotConfigured) return errorResultMsg(
+        allocator,
+        "the screen is locked, so there is no fingerprint to give, and no device is paired to approve from. " ++
+            "Run `secretctl 2fa enroll` to pair a phone, or unlock the screen. Retrying will not help.",
+    );
+    if (e == error.ApprovalRefused) return errorResultMsg(
+        allocator,
+        "the screen is locked and approval was not granted — denied, unanswered, or the approval service was unreachable. " ++
+            "Ask the human to approve on their phone. Each retry sends another push, so do not retry in a loop.",
+    );
     if (e == error.VaultLocked) return errorResultMsg(
         allocator,
         "vault is locked: the keychain unlock failed and an MCP server has no way to prompt for the master password. " ++
