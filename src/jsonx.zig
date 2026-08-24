@@ -1,7 +1,6 @@
 //! JSON helpers built on std.json. Encoding side accumulates into an
 //! ArrayList(u8); decoding side wraps std.json.parseFromSlice with a
-//! lifetime-managed Parsed value. Adds a base64 helper used by
-//! `run_with_secrets` for binary stdout/stderr.
+//! lifetime-managed Parsed value.
 
 const std = @import("std");
 
@@ -123,17 +122,6 @@ pub fn asArray(v: std.json.Value) ?std.json.Array {
     };
 }
 
-// ------- base64 -------
-
-const b64 = std.base64.standard;
-
-pub fn base64Encode(allocator: std.mem.Allocator, src: []const u8) ![]u8 {
-    const len = b64.Encoder.calcSize(src.len);
-    const out = try allocator.alloc(u8, len);
-    _ = b64.Encoder.encode(out, src);
-    return out;
-}
-
 // ------- tests -------
 
 const testing = std.testing;
@@ -187,11 +175,4 @@ test "decode object" {
 test "decode rejects garbage" {
     const a = testing.allocator;
     try testing.expectError(error.SyntaxError, parse(a, "{not json"));
-}
-
-test "base64Encode" {
-    const a = testing.allocator;
-    const out = try base64Encode(a, "hello");
-    defer a.free(out);
-    try testing.expectEqualSlices(u8, "aGVsbG8=", out);
 }

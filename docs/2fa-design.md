@@ -33,6 +33,14 @@ labelled as measured when only its narrower ancestor was — so treat every
 "measured" tag here as covering exactly what the Method column says and nothing
 adjacent to it.
 
+> **MCP was removed in v0.7.0.** This document predates that and refers to
+> `secretctl mcp`, `mcp_tools.zig`, `get_secret` and `run_with_secrets`
+> throughout. Those references are left as written: they are the record of what
+> was measured and fixed at the time, and rewriting them would destroy the
+> evidence trail this document exists for. Read them as history. The paths they
+> describe now belong to `secretctl exec`, which enforces the same
+> `.secretctl.toml` allowlist.
+
 ---
 
 ## 1. Evidence

@@ -20,7 +20,6 @@ const policy_mod = @import("policy.zig");
 const audit_mod = @import("audit.zig");
 const editor_mod = @import("editor.zig");
 const envelope_mod = @import("envelope.zig");
-const mcp_mod = @import("mcp.zig");
 const local_auth = @import("local_auth.zig");
 const authz = @import("authz.zig");
 const push_auth = @import("push_auth.zig");
@@ -62,7 +61,6 @@ pub const usage_text =
     \\  secretctl render TEMPLATE --out PATH
     \\  secretctl materialize NAME --out PATH [--mode MODE] [--mkdir]
     \\  secretctl reveal NAME
-    \\  secretctl mcp [--cwd PATH] [--allow-secret-read]   # MCP server over stdio
     \\  secretctl tag NAME X,Y[,Z]            # replace tags of a secret (doesn't re-encrypt value)
     \\  secretctl key add-keychain-protector [--no-touch-id]   # add another machine's keychain unlock path
     \\  secretctl sync                       # git pull/commit/push the vault dir
@@ -111,7 +109,6 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) u8 {
     if (std.mem.eql(u8, cmd, "render")) return runRender(allocator, tail);
     if (std.mem.eql(u8, cmd, "materialize")) return runMaterialize(allocator, tail);
     if (std.mem.eql(u8, cmd, "reveal")) return runReveal(allocator, tail);
-    if (std.mem.eql(u8, cmd, "mcp")) return runMcp(allocator, tail);
     if (std.mem.eql(u8, cmd, "key")) return runKey(allocator, tail);
     if (std.mem.eql(u8, cmd, "tag")) return runTag(allocator, tail);
     if (std.mem.eql(u8, cmd, "sync")) return runSync(allocator, tail);
@@ -177,7 +174,7 @@ fn runInit(allocator: std.mem.Allocator, args: []const []const u8) u8 {
     // Batch mode (testing) keeps Keychain off by default. This no longer
     // affects how many stdin lines are consumed — the passphrase has its own
     // channel now — but a test that wants a keychain protector must still ask
-    // for one. Tests that need Keychain (e.g. MCP smoke tests) set
+    // for one. Tests that need Keychain set
     // SECRETCTL_BATCH_KEYCHAIN=1.
     const use_keychain = if (batch)
         c_getenv("SECRETCTL_BATCH_KEYCHAIN") != null
@@ -1425,34 +1422,6 @@ fn runReveal(allocator: std.mem.Allocator, args: []const []const u8) u8 {
     return 0;
 }
 
-// ------- mcp -------
-
-fn runMcp(allocator: std.mem.Allocator, args: []const []const u8) u8 {
-    var cwd: ?[]const u8 = null;
-    var dangerous = false;
-    var i: usize = 0;
-    while (i < args.len) : (i += 1) {
-        const a = args[i];
-        if (std.mem.eql(u8, a, "--cwd")) {
-            i += 1;
-            if (i >= args.len) {
-                tty.writeStderr("--cwd requires a value\n");
-                return 2;
-            }
-            cwd = args[i];
-        } else if (std.mem.eql(u8, a, "--allow-secret-read")) {
-            dangerous = true;
-        } else {
-            tty.writeStderr("unknown mcp flag: ");
-            tty.writeStderr(a);
-            tty.writeStderr("\n");
-            return 2;
-        }
-    }
-    return mcp_mod.serve(allocator, .{ .cwd = cwd, .dangerous = dangerous });
-}
-
-
 // ------- 2fa (out-of-band approval) -------
 
 /// Ask a paired phone to approve this unlock. Returns true only on a verdict
@@ -1469,7 +1438,6 @@ fn requestPhoneApproval(
     return push_auth.approveOrExplain(
         allocator,
         home,
-        .cli,
         "secretctl · unlock vault",
         reason,
     );

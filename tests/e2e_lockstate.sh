@@ -132,20 +132,6 @@ grep -qi "master password" <<<"$out" \
 
 rm -f "$SECRETCTL_HOME/push.json"
 
-# The same must hold for the MCP server, which is the case that started this:
-# an agent asks for a secret with nobody at the machine.
-set +e
-out=$(SECRETCTL_FORCE_LOCKED=1 "$BIN" mcp --cwd "$WORK" <<<'{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_secrets","arguments":{}}}' 2>&1); rc=$?
-set -e
-if grep -q '"name":"TOK"' <<<"$out"; then
-  bad "mcp served vault contents while locked" "${out:0:200}"
-else
-  ok "locked: mcp does not serve vault contents"
-fi
-grep -q "2fa enroll" <<<"$out" \
-  && ok "locked: mcp names the command that would fix it" \
-  || bad "mcp gave no actionable hint while locked" "${out:0:200}"
-
 # ---------- the override fails closed ----------
 set +e
 out=$(SECRETCTL_FORCE_LOCKED=yes SECRETCTL_PASSPHRASE_FD=3 "$BIN" list --json 3<<<"$PASS" 2>&1); rc=$?

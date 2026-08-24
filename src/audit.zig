@@ -1,5 +1,5 @@
 //! Append-only JSONL audit log. Each event is one line of JSON object with
-//! at minimum: ts (ISO8601 UTC), op, transport ("cli"|"mcp"). Optional
+//! at minimum: ts (ISO8601 UTC), op, transport ("cli"). Optional
 //! per-event fields are typed (string / int / bool / string_array).
 //!
 //! Hard rules:
@@ -38,14 +38,16 @@ const O_WRONLY: c_int = 0x0001;
 const O_CREAT: c_int = 0x0200;
 const O_APPEND: c_int = 0x0008;
 
+// One variant, kept as an enum rather than dropped: it keeps the
+// "transport" field in the log schema stable for anything already parsing
+// these lines, and leaves room for a second entry point if one ever arrives.
+// There was an `mcp` variant; it went when that server was removed.
 pub const Transport = enum {
     cli,
-    mcp,
 
     pub fn str(self: Transport) []const u8 {
         return switch (self) {
             .cli => "cli",
-            .mcp => "mcp",
         };
     }
 };
@@ -190,7 +192,7 @@ test "log writes JSONL" {
         arr("tags", &tags),
         n("exit", 0),
     });
-    logTo(path, "mcp.run_with_secrets", .mcp, &.{
+    logTo(path, "exec", .cli, &.{
         s("cmd", "yarn"),
         b("truncated", false),
     });
@@ -213,7 +215,6 @@ test "log writes JSONL" {
 
     // Spot-check field values.
     try testing.expect(std.mem.indexOf(u8, data, "\"transport\":\"cli\"") != null);
-    try testing.expect(std.mem.indexOf(u8, data, "\"transport\":\"mcp\"") != null);
     try testing.expect(std.mem.indexOf(u8, data, "\"tags\":[\"npm\",\"github\"]") != null);
     try testing.expect(std.mem.indexOf(u8, data, "\"exit\":0") != null);
     try testing.expect(std.mem.indexOf(u8, data, "\"truncated\":false") != null);

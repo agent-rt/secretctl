@@ -612,22 +612,17 @@ pub fn buildPurpose(
 /// failure on stderr. Returns true only for an approving verdict whose
 /// signature verified against a key pinned at pairing.
 ///
-/// Lives here rather than in `cli.zig` because the MCP server needs the same
-/// decision and cannot reach a private CLI helper. That matters more than the
-/// tidiness: an agent asking for a secret through MCP is the case that started
-/// this work, and an MCP server has no interactive channel at all — fd 0 is the
-/// JSON-RPC transport (`mcp_tools.unlockSession`), so approval from another
-/// device is its *only* way past a locked screen.
+/// Progress and errors go to stderr, so they never mix with a command's own
+/// output on stdout.
 ///
-/// stderr is safe from both: the CLI prints there already, and for MCP stdout
-/// is the protocol channel while stderr is the server log.
+/// It lived here rather than in `cli.zig` so the MCP server could share it.
+/// With that server removed there is one caller, but the split is still the
+/// right one: this is where the protocol lives, and `cli.zig` should not be
+/// the place a second entry point has to reach into.
 pub fn approveOrExplain(
     allocator: std.mem.Allocator,
     home: []const u8,
-    transport: audit.Transport,
-    /// What is being authorised, shown on the phone. Distinguishes an agent's
-    /// request from one typed at the keyboard, which is the whole reason a
-    /// human is being asked.
+    /// What is being authorised, shown on the phone.
     title: []const u8,
     reason: []const u8,
 ) bool {
@@ -647,7 +642,6 @@ pub fn approveOrExplain(
         title,
         reason,
         &.{
-            .{ "via", transport.str() },
             .{ "reason", reason },
         },
         // Releasing vault access is not a one-tap-from-a-lock-screen decision.
@@ -673,7 +667,7 @@ pub fn approveOrExplain(
         return false;
     };
 
-    audit.log("authz.approved", transport, &.{
+    audit.log("authz.approved", .cli, &.{
         audit.s("device", verdict.device_fingerprint),
     });
     tty.writeStderr("approved by ");

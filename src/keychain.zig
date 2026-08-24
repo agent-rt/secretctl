@@ -189,8 +189,9 @@ fn keychainFetch(allocator: std.mem.Allocator, service: []const u8, account: []c
     // item's trusted-app ACL no longer matches this binary (e.g. after a
     // `brew upgrade` replaced it), the read fails with errSecInteractionNotAllowed
     // instead of prompting, and the caller falls back to the master password
-    // and re-establishes the protector. Non-interactive sessions (activation,
-    // MCP) keep the dialog, since they have no terminal for that fallback.
+    // and re-establishes the protector. Non-interactive sessions (Home Manager
+    // activation, launchd) keep the dialog, since they have no terminal for
+    // that fallback.
     // NB: our items live in the legacy keychain, so the controlling knob is
     // SecKeychainSetUserInteractionAllowed (process-global), not the
     // kSecUseAuthenticationUI query key (data-protection keychain only).

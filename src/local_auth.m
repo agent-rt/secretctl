@@ -3,7 +3,7 @@
 // Implementing this in Objective-C rather than Zig avoids hand-rolling
 // objc_msgSend, NSString construction, and the Block ABI.
 // Two C-ABI exports are sufficient for our use cases (Touch ID-gated
-// keychain unlock and MCP `get_secret`).
+// keychain unlock).
 //
 // Build flag in build.zig: -fobjc-arc + -framework LocalAuthentication.
 
