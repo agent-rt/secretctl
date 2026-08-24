@@ -153,9 +153,35 @@ Note what closes it and what does not. The locked row is closed because
 `authz.decide()` runs *above* the cache. **A cryptographic second factor does
 not close the unlocked row**: the agent caches `mk` itself, so any scheme that
 changes how `mk` is *derived* — §4.2 included — is bypassed by a warm cache for
-the length of its TTL. Its own §9 Q4 admits this. Narrowing what the cache
-serves, or to whom, is a different piece of work and the one that touches this
-row.
+the length of its TTL. Its own §9 Q4 admits this.
+
+### 1.4.1 What was done about it
+
+Narrowing what the cache serves is the work that touches this row, and two
+changes landed:
+
+- **`reveal` and MCP `get_secret` no longer accept the cache as
+  authorization** (`agent.CachePolicy`). Those two exist to hand plaintext to
+  the caller, so each one now costs a fresh Touch ID, or phone approval while
+  locked. The MCP server turned out to consult the cache nowhere at all, so
+  `get_secret` was already strict — the compiler found that, via an unused
+  parameter, when the policy was threaded through it.
+- **Default TTL 300 s → 120 s.** Bounds the window rather than closing it.
+
+And one thing deliberately *not* done: `exec`, `render` and `materialize` still
+use the cache. They are the measured bulk of normal use — `exec` alone is more
+than a third of all audited operations — so excluding them would mean a prompt
+per invocation, which is the cost the cache exists to avoid.
+
+**So `exec --tag t -- env` remains an unprompted path to plaintext while the
+cache is warm.** Stated plainly because a partial mitigation described as a fix
+is worse than none: against a deliberate attacker this raises the bar and
+narrows the window, it does not close the row. Closing it means either
+`SECRETCTL_AGENT=0`, or accepting a prompt per `exec`.
+
+Cached unlocks are now logged as `unlock.cached`. Before this the audit trail
+could not distinguish an unlock a human authorised from one served for free,
+which is what `2of2-protector.md` §9 Q4 asked for.
 
 ---
 

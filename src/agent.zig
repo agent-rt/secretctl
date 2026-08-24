@@ -72,8 +72,33 @@ const OP_STATUS: u8 = 5; // []              -> [4 count_le]
 const id_len = 16;
 const key_len = aes.key_len; // 32
 
-const default_ttl: i64 = 300;
+// 120 s, down from 300. The cache is a deliberate trade — for its lifetime,
+// this uid can use the vault with no prompt — and `2fa-design.md` §1.4 measures
+// what that means for a hostile local caller. Halving the window does not close
+// that; it bounds it. Sliding, so a run of commands still costs one prompt.
+const default_ttl: i64 = 120;
 const max_entries = 16;
+
+/// Whether an unlock may be served from the cache.
+///
+/// Reading a cached key skips every gate — biometric and out-of-band alike —
+/// for the length of the TTL, which is the point of the cache and also
+/// `2fa-design.md` §1.4's open row. Operations whose entire purpose is handing
+/// plaintext to the caller opt out, so those always cost a fresh authorization.
+///
+/// Deliberately **not** applied to `exec` and friends, and the docs say so
+/// plainly: `exec --tag t -- env` therefore remains an unprompted path to
+/// plaintext, so this raises the bar and makes the remaining path visible in
+/// the audit log rather than closing it. Excluding `exec` too would close it,
+/// at one prompt per `exec` — the measured majority of all vault use.
+pub const CachePolicy = enum {
+    /// Serve from the cache when warm, and populate it after unlocking.
+    allow,
+    /// Never read the cache. Still populates it: the key is already in memory
+    /// by then, so refusing to store it would only cost the *next* command a
+    /// prompt without denying anything to an attacker who can run this one.
+    bypass_read,
+};
 
 /// True if the agent feature is opted in via $SECRETCTL_AGENT.
 pub fn enabled() bool {
@@ -84,7 +109,7 @@ pub fn enabled() bool {
     return true;
 }
 
-/// Sliding TTL in seconds, from $SECRETCTL_AGENT_TTL (default 300, clamped
+/// Sliding TTL in seconds, from $SECRETCTL_AGENT_TTL (default 120, clamped
 /// to 1..3600).
 pub fn ttlSeconds() i64 {
     const v = getenv("SECRETCTL_AGENT_TTL") orelse return default_ttl;
@@ -524,9 +549,29 @@ test "store replaces same id and evicts soonest when full" {
     try testing.expect(s.get(&nid, 1000) != null); // new present
 }
 
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+
 test "ttlSeconds clamps and defaults" {
-    // No env in test → default.
-    try testing.expectEqual(@as(i64, 300), ttlSeconds());
+    // The comment this replaces said "no env in test → default", which was not
+    // true of any developer who had $SECRETCTL_AGENT_TTL set — and with the old
+    // default of 300 and that variable commonly set to 300, the assertion passed
+    // for the wrong reason locally while failing in CI's clean environment.
+    // So pin it: same reason every e2e suite pins SECRETCTL_FORCE_LOCKED.
+    defer _ = unsetenv("SECRETCTL_AGENT_TTL");
+
+    _ = unsetenv("SECRETCTL_AGENT_TTL");
+    try testing.expectEqual(@as(i64, default_ttl), ttlSeconds());
+
+    // And the override and its clamps, which nothing covered before.
+    _ = setenv("SECRETCTL_AGENT_TTL", "45", 1);
+    try testing.expectEqual(@as(i64, 45), ttlSeconds());
+    _ = setenv("SECRETCTL_AGENT_TTL", "0", 1);
+    try testing.expectEqual(@as(i64, 1), ttlSeconds());
+    _ = setenv("SECRETCTL_AGENT_TTL", "99999", 1);
+    try testing.expectEqual(@as(i64, 3600), ttlSeconds());
+    _ = setenv("SECRETCTL_AGENT_TTL", "not-a-number", 1);
+    try testing.expectEqual(@as(i64, default_ttl), ttlSeconds());
 }
 
 test "socketPath builds a uid-scoped path" {

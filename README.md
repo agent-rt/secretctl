@@ -102,8 +102,20 @@ passphrase, plus one keychain entry per machine.
 
 To avoid one Touch ID prompt per command, set `SECRETCTL_AGENT=1` — a
 background agent caches the unlocked master key with a sliding TTL
-(`SECRETCTL_AGENT_TTL`, default 300s). Inspect it with
+(`SECRETCTL_AGENT_TTL`, default 120s). Inspect it with
 `secretctl agent status`, drop the cache with `secretctl agent stop`.
+
+`reveal` does **not** use the cache, and neither does the MCP server — both
+hand plaintext straight to whoever asked, so they always cost a fresh Touch
+ID (or phone approval while locked). Cached unlocks are recorded in the
+audit log as `unlock.cached`, so afterwards you can tell which unlocks a
+human authorized from which ones the cache served for free.
+
+`exec`, `render` and `materialize` do still use the cache. That is a
+deliberate trade, not an oversight — they are the bulk of normal use, and
+excluding them would mean a prompt every time. It also means
+`secretctl exec --tag t -- env` remains an unprompted path to plaintext
+while the cache is warm; a short TTL is what bounds that.
 
 ## When the screen is locked
 
@@ -146,9 +158,11 @@ that does and does not mean, measured rather than assumed:
 - What it can do is *ask* `secretctl`, and then it meets the same gates you
   do. With the screen locked that means phone approval.
 - The gap: with the screen **unlocked and the key cache warm**
-  (`SECRETCTL_AGENT=1`), any local caller gets a secret with no prompt at
-  all. That is the cache working as designed, and it is the reason to keep
-  the TTL short if you share the machine with anything you do not trust.
+  (`SECRETCTL_AGENT=1`), a local caller can get a secret through `exec` with
+  no prompt at all. `reveal` and MCP `get_secret` are excluded from the
+  cache, so they always cost fresh authorization — but `exec` is not, which
+  narrows the gap rather than closing it. The TTL (default 120s) is what
+  bounds it; `SECRETCTL_AGENT=0` closes it at one prompt per command.
 
 `docs/2fa-design.md` §1 carries the measurements; `docs/2of2-protector.md`
 specifies a real second factor and records why it is not being built.

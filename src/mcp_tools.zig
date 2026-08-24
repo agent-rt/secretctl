@@ -86,6 +86,9 @@ const Session = struct {
     }
 };
 
+// No cache policy parameter, deliberately: this server never consults the key
+// cache. Every tool goes through the keychain protector and the authorization
+// gate, so `get_secret` is already as strict as `cli.runReveal` was made to be.
 fn unlockSession(allocator: std.mem.Allocator) !Session {
     var p = try paths_mod.resolve(allocator);
     var ok = false;
@@ -131,9 +134,14 @@ fn unlockSession(allocator: std.mem.Allocator) !Session {
     // The previous code did prompt, with a comment claiming it read /dev/tty;
     // tty.zig has only ever read fd 0, so the branch could not succeed
     // (isStdinTty() is false behind a pipe) and under SECRETCTL_BATCH it would
-    // have eaten a JSON-RPC frame. Warming the agent cache from a terminal is
-    // the supported path; approval from a phone is the unattended one, handled
-    // above.
+    // have eaten a JSON-RPC frame.
+    //
+    // Note what is *not* here: any use of the agent key cache. This server has
+    // exactly two ways in — a keychain protector, or out-of-band approval —
+    // which is why `errorResult` no longer tells the operator to warm the
+    // cache. Measured: with a passphrase-only vault and a warm cache
+    // (`agent status` reporting a key held), this path still fails, so that
+    // advice sent people round a loop.
     const keychain_attempt = master_key_mod.parseAndUnlock(allocator, blob, null, gate, &master_key, null) catch |e| switch (e) {
         master_key_mod.Error.AuthenticationFailed,
         master_key_mod.Error.NoUsableProtector,
@@ -610,8 +618,10 @@ fn errorResult(allocator: std.mem.Allocator, e: anyerror) anyerror!mcp.ToolResul
     );
     if (e == error.VaultLocked) return errorResultMsg(
         allocator,
-        "vault is locked: the keychain unlock failed and an MCP server has no way to prompt for the master password. " ++
-            "Unlock it once in a terminal (e.g. `SECRETCTL_AGENT=1 secretctl list`) and retry — that caches the key for $SECRETCTL_AGENT_TTL seconds.",
+        "the vault could not be unlocked: the Keychain protector did not produce the key, and an MCP server has no way " ++
+            "to prompt for the master password. Run `secretctl key add-keychain-protector` on this machine, or " ++
+            "`secretctl reinstall-keychain` if it exists but has gone stale. Warming the key cache does not help: this " ++
+            "server never reads it.",
     );
     var msg_buf: [128]u8 = undefined;
     const msg = std.fmt.bufPrint(&msg_buf, "{s}", .{@errorName(e)}) catch "error";

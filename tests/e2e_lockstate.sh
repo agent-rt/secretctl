@@ -159,6 +159,55 @@ set -e
 [[ $rc -eq 0 ]] && ok "override: 0 means unlocked" \
                 || bad "override with 0 did not behave as unlocked" "$out"
 
+# ---------- the key cache does not authorize `reveal` ----------
+# The cache exists so a run of commands costs one prompt. `reveal` opts out of
+# it (agent.CachePolicy), so a warm cache must not be enough to print plaintext.
+#
+# Asserted on the audit counter, not on reveal's output: `reveal` needs a
+# terminal, script(1) supplies a pty, and a pty line-wraps — so grepping the
+# value out of it is unreliable. `unlock.cached` is written exactly when the
+# cache served an unlock, which is the fact under test and is wrap-proof.
+#
+# Falsified before being trusted: with reveal switched to `.allow`, this fails.
+export SECRETCTL_AGENT=1
+LOG=~/Library/Logs/secretctl.log
+# `grep -c` prints 0 AND exits 1 when there is no match, so a naive
+# `grep -c ... || echo 0` emits "0\n0" and every [[ -gt ]] using it dies with a
+# syntax error. Capture, then default only when grep printed nothing at all
+# (missing file).
+count_cached() {
+  local n
+  n=$(grep -c '"op":"unlock.cached"' "$LOG" 2>/dev/null || true)
+  echo "${n:-0}"
+}
+
+sc list --json >/dev/null 2>&1 || true          # warm it
+BEFORE=$(count_cached)
+if out=$(SECRETCTL_FORCE_LOCKED=0 "$BIN" list --json 2>&1) \
+   && grep -q '"name":"TOK"' <<<"$out" \
+   && [[ "$(count_cached)" -gt "$BEFORE" ]]; then
+  ok "cache: 'list' unlocks from the cache with no passphrase"
+else
+  bad "cache: 'list' did not use the cache, so the next assertion proves nothing" \
+      "${out:0:120}"
+fi
+
+# reveal must not take that same warm key. It will fail at the passphrase prompt
+# instead, which is fine and is the point — the prompt is downstream of the
+# cache check, so reaching it at all means the cache was refused.
+BEFORE=$(count_cached)
+set +e
+SECRETCTL_FORCE_LOCKED=0 script -q /dev/null "$BIN" reveal TOK >/dev/null 2>&1
+set -e
+if [[ "$(count_cached)" -eq "$BEFORE" ]]; then
+  ok "cache: 'reveal' refuses the warm cache and needs fresh authorization"
+else
+  bad "cache: a warm cache authorized 'reveal'" "unlock.cached went $BEFORE -> $(count_cached)"
+fi
+
+"$BIN" agent stop >/dev/null 2>&1 || true
+export SECRETCTL_AGENT=0
+
 # ---------- commands that need no unlock are untouched ----------
 if SECRETCTL_FORCE_LOCKED=1 "$BIN" --version >/dev/null 2>&1; then
   ok "locked: --version still works (no unlock needed)"

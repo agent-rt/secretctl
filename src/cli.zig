@@ -75,7 +75,7 @@ pub const usage_text =
     \\  $VISUAL / $EDITOR control which editor `edit` and `add --editor` launch.
     \\  $SECRETCTL_AGENT=1 caches the unlocked master key in a background agent
     \\      so repeated commands skip the Touch ID prompt (auto-spawned).
-    \\  $SECRETCTL_AGENT_TTL sets the sliding cache lifetime in seconds (default 300).
+    \\  $SECRETCTL_AGENT_TTL sets the sliding cache lifetime in seconds (default 120).
     \\  $SECRETCTL_FORCE_LOCKED=1 treats the screen as locked (0 as unlocked), which
     \\      is the only way to exercise the locked-screen authorization path without
     \\      actually locking the screen.
@@ -294,7 +294,13 @@ const Session = struct {
     }
 };
 
-fn unlockSession(allocator: std.mem.Allocator) ?Session {
+fn unlockSession(
+    allocator: std.mem.Allocator,
+    /// Whether the key cache may answer this. `.bypass_read` for operations
+    /// whose whole purpose is handing plaintext to the caller. See
+    /// agent.CachePolicy for what this does and does not buy.
+    cache: agent_mod.CachePolicy,
+) ?Session {
     var p = paths_mod.resolve(allocator) catch return null;
     var ok = false;
     defer if (!ok) p.deinit();
@@ -356,8 +362,15 @@ fn unlockSession(allocator: std.mem.Allocator) ?Session {
     if (use_agent) {
         @memcpy(&mk_id_hdr, blob[10..26]);
         agent_mod.ensureRunning();
-        if (agent_mod.cacheGet(&mk_id_hdr, &master_key)) {
-            // Cache hit: skip Touch ID / password entirely.
+        if (cache == .allow and agent_mod.cacheGet(&mk_id_hdr, &master_key)) {
+            // Cache hit: skip Touch ID / password entirely. Recorded, because
+            // otherwise the audit trail cannot distinguish an unlock that a
+            // human authorised from one the cache served for free — and with
+            // the gate above the cache, that distinction is the only way to
+            // see which is which after the fact.
+            audit_mod.log("unlock.cached", .cli, &.{
+                audit_mod.s("authorization", "none — served from the key cache"),
+            });
             return finishUnlock(allocator, p, &master_key, &ok);
         }
     }
@@ -631,7 +644,7 @@ fn runAdd(allocator: std.mem.Allocator, args: []const []const u8) u8 {
         preread = mem_util.Plaintext.fromOwnedSlice(allocator, bytes);
     }
 
-    var sess = unlockSession(allocator) orelse return 1;
+    var sess = unlockSession(allocator, .allow) orelse return 1;
     defer sess.deinit();
 
     if (sess.body.findIndex(name) != null) {
@@ -736,7 +749,7 @@ fn runEdit(allocator: std.mem.Allocator, args: []const []const u8) u8 {
     }
     const name = args[0];
 
-    var sess = unlockSession(allocator) orelse return 1;
+    var sess = unlockSession(allocator, .allow) orelse return 1;
     defer sess.deinit();
 
     const idx = sess.body.findIndex(name) orelse {
@@ -803,7 +816,7 @@ fn runRm(allocator: std.mem.Allocator, args: []const []const u8) u8 {
         return 2;
     }
     const name = args[0];
-    var sess = unlockSession(allocator) orelse return 1;
+    var sess = unlockSession(allocator, .allow) orelse return 1;
     defer sess.deinit();
     sess.body.removeByName(allocator, name) catch |e| switch (e) {
         vault_mod.Error.NotFound => {
@@ -845,7 +858,7 @@ fn runList(allocator: std.mem.Allocator, args: []const []const u8) u8 {
         }
     }
 
-    var sess = unlockSession(allocator) orelse return 1;
+    var sess = unlockSession(allocator, .allow) orelse return 1;
     defer sess.deinit();
 
     var filtered: vault_mod.VaultBody = undefined;
@@ -986,7 +999,7 @@ fn runExec(allocator: std.mem.Allocator, args: []const []const u8) u8 {
         return 2;
     };
 
-    var sess = unlockSession(allocator) orelse return 1;
+    var sess = unlockSession(allocator, .allow) orelse return 1;
     defer sess.deinit();
 
     // Decide which secrets to inject.
@@ -1171,7 +1184,7 @@ fn runRender(allocator: std.mem.Allocator, args: []const []const u8) u8 {
     const template_path = args[0];
     const out_path = args[2];
 
-    var sess = unlockSession(allocator) orelse return 1;
+    var sess = unlockSession(allocator, .allow) orelse return 1;
     defer sess.deinit();
 
     const template = fsx.readAllAlloc(allocator, template_path, 1 * 1024 * 1024) catch {
@@ -1251,7 +1264,7 @@ fn runTag(allocator: std.mem.Allocator, args: []const []const u8) u8 {
         tags.append(allocator, trimmed) catch return errExit("oom");
     }
 
-    var sess = unlockSession(allocator) orelse return 1;
+    var sess = unlockSession(allocator, .allow) orelse return 1;
     defer sess.deinit();
 
     sess.body.setTags(allocator, name, tags.items) catch |e| switch (e) {
@@ -1336,7 +1349,7 @@ fn runMaterialize(allocator: std.mem.Allocator, args: []const []const u8) u8 {
         }
     }
 
-    var sess = unlockSession(allocator) orelse return 1;
+    var sess = unlockSession(allocator, .allow) orelse return 1;
     defer sess.deinit();
 
     var pt = sess.body.revealSecret(allocator, &sess.master_key, &sess.master_key_id, name.?) catch |e| switch (e) {
@@ -1385,7 +1398,11 @@ fn runReveal(allocator: std.mem.Allocator, args: []const []const u8) u8 {
     }
     const name = args[0];
 
-    var sess = unlockSession(allocator) orelse return 1;
+    // `reveal` prints plaintext to whoever ran it, so it does not take the
+    // cache's word for authorization — every reveal costs a fresh Touch ID at
+    // the desk, or phone approval while locked. `exec` deliberately still uses
+    // the cache; agent.CachePolicy records why, and what that leaves open.
+    var sess = unlockSession(allocator, .bypass_read) orelse return 1;
     defer sess.deinit();
 
     var pt = sess.body.revealSecret(allocator, &sess.master_key, &sess.master_key_id, name) catch |e| switch (e) {

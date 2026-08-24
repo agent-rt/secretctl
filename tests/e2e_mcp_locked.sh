@@ -69,7 +69,14 @@ echo "ok: mcp answers every frame with a locked vault (no frame consumed as inpu
 # The literal old prompt, not just the words "master password" — the current
 # diagnostic legitimately mentions them while explaining why it cannot ask.
 grep -q "master password (mcp unlock)" "$ERR" && { echo "FAIL: mcp prompted for a password"; exit 1; }
-grep -q "vault is locked" "$OUT" || { echo "FAIL: locked vault did not report an actionable error"; exit 1; }
+# Assert the *actionable* part, not a fixed prefix: what makes this diagnostic
+# useful is that it names a command the operator can run. An earlier version
+# grepped the opening words and broke when the wording was corrected — the
+# wording is not the contract, the actionability is.
+grep -q "add-keychain-protector" "$OUT" || { echo "FAIL: locked vault did not report an actionable error"; exit 1; }
+# It must also not resurrect the advice that was measured not to work: this
+# server never reads the key cache, so telling anyone to warm it is a loop.
+grep -q 'SECRETCTL_AGENT=1 secretctl list' "$OUT" && { echo "FAIL: mcp advised warming a cache it never reads"; exit 1; }
 grep -q "AuthenticationFailed" "$OUT" && { echo "FAIL: frame was used as a password"; exit 1; }
 echo "ok: locked vault reports an actionable error, no prompt on stderr"
 
