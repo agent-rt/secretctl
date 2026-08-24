@@ -32,10 +32,14 @@ pub fn build(b: *std.Build) void {
         exe_mod.linkFramework("CoreFoundation", .{});
         exe_mod.linkFramework("LocalAuthentication", .{});
         exe_mod.linkFramework("Foundation", .{});
-        exe_mod.addCSourceFile(.{
-            .file = b.path("src/local_auth.m"),
-            .flags = &.{ "-fobjc-arc", "-Wno-everything" },
-        });
+        // CGSessionCopyCurrentDictionary, for screen-lock state.
+        exe_mod.linkFramework("CoreGraphics", .{});
+        for ([_][]const u8{ "src/local_auth.m", "src/lockstate.m", "src/http.m" }) |f| {
+            exe_mod.addCSourceFile(.{
+                .file = b.path(f),
+                .flags = &.{ "-fobjc-arc", "-Wno-everything" },
+            });
+        }
     }
     exe_mod.link_libc = true;
 
@@ -66,10 +70,13 @@ pub fn build(b: *std.Build) void {
         test_mod.linkFramework("CoreFoundation", .{});
         test_mod.linkFramework("LocalAuthentication", .{});
         test_mod.linkFramework("Foundation", .{});
-        test_mod.addCSourceFile(.{
-            .file = b.path("src/local_auth.m"),
-            .flags = &.{ "-fobjc-arc", "-Wno-everything" },
-        });
+        test_mod.linkFramework("CoreGraphics", .{});
+        for ([_][]const u8{ "src/local_auth.m", "src/lockstate.m", "src/http.m" }) |f| {
+            test_mod.addCSourceFile(.{
+                .file = b.path(f),
+                .flags = &.{ "-fobjc-arc", "-Wno-everything" },
+            });
+        }
     }
     test_mod.link_libc = true;
     const t = b.addTest(.{ .root_module = test_mod });

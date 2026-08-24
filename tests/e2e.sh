@@ -26,6 +26,11 @@ cleanup() {
 trap cleanup EXIT
 
 export SECRETCTL_BATCH=1
+# Pin the screen-lock state. Without this the suite passes or fails depending
+# on whether a human happens to be looking at the screen: the authorization
+# gate refuses every unlock while locked, which is correct behaviour and
+# useless as a test variable.
+export SECRETCTL_FORCE_LOCKED=0
 # $VISUAL takes precedence over $EDITOR in the editor-launch path, and the
 # editor tests below only override $EDITOR. Without this, a developer with
 # VISUAL set gets their real editor spawned against a pipe.

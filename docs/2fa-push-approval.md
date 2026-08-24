@@ -57,6 +57,11 @@ phone-held share later changes the payload, not the transport.
 
 ### 2.1 Lock detection
 
+Confirmed against a genuinely locked screen, not only through the override:
+with the Mac locked, `CGSSessionScreenIsLocked=1` and every unlocking command
+refused at the gate. That was discovered by accident — the whole test suite went
+red at once — which is itself the finding recorded in §2.3.
+
 `CGSessionCopyCurrentDictionary()`, called from the CLI. Measured on
 macOS 25.5 with an ad-hoc signed binary: works with no entitlement, no TCC
 prompt, no window-server connection of our own.
@@ -79,6 +84,87 @@ both keys absent means no GUI session at all ⇒ `unknown` ⇒ fail closed.
 `SECRETCTL_FORCE_LOCKED=1|0` overrides the query, so the locked path is
 testable without locking the screen. Any non-empty value other than `0` means
 locked — the override fails closed too.
+
+### 2.4 A stale service worker is indistinguishable from a bug
+
+The first real locked-screen approval failed with the phone reporting a key
+mismatch, and every server-side fact checked out: right app, right device,
+right sealed length, push accepted, and the pinned keys matching the
+service's byte for byte. A cross-language test then showed the sealing
+construction itself was fine in the failing direction.
+
+The cause was that the phone's service worker predated the fix. The page
+rendered correct values using new code while an *old* worker did the
+decrypting, and the old worker read `app_id` from a legacy single-registration
+record — the JS client's app, not the asking client's. Wrong AAD, so no key
+could have worked.
+
+Two things came out of it, both applied:
+
+- **Never name a culprit in a decryption error.** The message said the sealing
+  key did not match, which sent the investigation at keys. The seal key, the
+  `req_id` and the `app_id` all feed the same AEAD; the message now says so and
+  reports the values actually used.
+- **Make the running build visible.** The worker answers a build query and the
+  page shows both its own stamp and the worker's. A worker older than the page
+  means the behaviour being observed is not the code being read. `bun run
+  deploy` stamps before deploying.
+
+The general form, which is the third variant of it in this project: when
+behaviour contradicts freshly written code, establish *which build is running*
+before doubting the code.
+
+### 2.2b Measured: a Touch-ID-gated keychain protector is unusable while locked
+
+This settles §1.3 of `2fa-design.md` and changes what §4.2 there is *for*.
+
+Two vaults, real locked screen, no passphrase fd supplied — so only the keychain
+path could succeed and no passphrase fallback could mask the result:
+
+| keychain protector | approval | unlock |
+|---|---|---|
+| `flags=0x00`, no Touch ID gate | approved, signature verified | **succeeded**, secret returned |
+| `flags=0x01`, Touch ID gate | approved, signature verified | **failed** after 13 s |
+
+The 13 s matters: the biometric gate **fails fast** while locked, it does not
+hang. So the unbounded `DISPATCH_TIME_FOREVER` in `local_auth.m` is not the
+cause of the original symptom — `canEvaluatePolicy`/`evaluatePolicy` simply
+refuses. That downgrades §5 item 1 from "the likely bug" to defence in depth,
+and it means the original "screen locked and everything hangs" report was the
+*passphrase prompt with no TTY*, not the biometric prompt.
+
+**The consequence is not a nicety.** A consent gate and a Touch ID gate are
+mutually exclusive while the screen is locked, because the thing that proves a
+human consented cannot also satisfy a check that requires a finger on a sensor
+that is unavailable. So exactly two configurations make locked-screen approval
+useful:
+
+1. **A keychain protector without the Touch ID gate.** Works today, as measured.
+   The cost is giving up the at-the-desk biometric prompt, and M3 already shows
+   that gate is an application-level `if` rather than a barrier — anything
+   running as this uid can read the wrap key regardless.
+2. **The 2-of-2 protector of `2fa-design.md` §4.2.** The phone releases a key
+   share as part of approving, so approval *produces* the key instead of
+   authorising a step that then cannot be satisfied.
+
+Every earlier note in these documents calling §4.2 "stronger but optional" is
+wrong on this point, and is corrected: for the locked-screen case it is the
+prerequisite. That was not a design insight; it came out of running the thing.
+
+### 2.3 Every test suite must pin the lock state
+
+Adding the gate made the entire e2e suite fail whenever the developer's screen
+happened to be locked, because refusing every unlock is exactly correct
+behaviour. A suite whose result depends on whether a human is looking at the
+screen is not a test.
+
+So every suite now exports `SECRETCTL_FORCE_LOCKED=0`, and the lockstate suite
+sets it explicitly on both sides. This is the third variable in this project to
+need pinning for the same reason, after `SECRETCTL_AGENT` (a warm cache masked a
+positional-stdin bug) and `VISUAL` (it outranks `EDITOR`, so a developer's real
+editor got spawned against a pipe). The pattern is worth naming: anything the
+product reads from the environment has to be pinned by the tests, or the
+environment silently becomes an input.
 
 ### 2.2 Where the check goes
 
