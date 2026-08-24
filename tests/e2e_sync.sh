@@ -18,6 +18,7 @@ B="$WORK/host-b"
 BARE="$WORK/origin.git"
 mkdir -p "$A" "$B"
 export SECRETCTL_BATCH=1
+export SECRETCTL_AGENT=0
 
 cleanup() {
   rm -rf "$WORK"
@@ -26,8 +27,15 @@ trap cleanup EXIT
 
 PASS="hunter2hunter2"
 
+# The master passphrase goes on its own fd, never on stdin: stdin is the
+# secret-value channel, and whether an unlock consumes a stdin line depends on
+# keychain/agent state, so sharing them silently stored the passphrase as a
+# secret value. See tty.passphraseFd.
+# This suite drives two vaults, so the home is the first argument.
+sch() { local home="$1"; shift; SECRETCTL_HOME="$home" SECRETCTL_PASSPHRASE_FD=3 "$BIN" "$@" 3<<<"$PASS"; }
+
 # ---------- bootstrap host A ----------
-SECRETCTL_HOME="$A" "$BIN" init <<<"$PASS" >/dev/null
+sch "$A" init >/dev/null
 echo "ok: init A"
 
 # Initial protector count = 1 (only passphrase since SECRETCTL_BATCH_KEYCHAIN unset)
@@ -36,13 +44,13 @@ COUNT=$(/usr/bin/od -An -t u4 -N 4 -j 30 < "$A/master.key" | tr -d ' ')
 echo "ok: A starts with 1 protector"
 
 # Add a keychain protector for host A
-SECRETCTL_HOME="$A" "$BIN" key add-keychain-protector --no-touch-id <<<"$PASS" >/dev/null
+sch "$A" key add-keychain-protector --no-touch-id >/dev/null
 COUNT=$(/usr/bin/od -An -t u4 -N 4 -j 30 < "$A/master.key" | tr -d ' ')
 [[ "$COUNT" == "2" ]] || { echo "FAIL: after first add expected 2, got $COUNT"; exit 1; }
 echo "ok: A has 2 protectors after add-keychain-protector"
 
 # Add a secret on A so we can verify the vault round-trips through git
-printf "%s\nsecret-from-A\n" "$PASS" | SECRETCTL_HOME="$A" "$BIN" add SHARED_TOKEN --tag t >/dev/null
+printf 'secret-from-A\n' | sch "$A" add SHARED_TOKEN --tag t >/dev/null
 echo "ok: A added SHARED_TOKEN"
 
 # ---------- git push from A ----------
@@ -63,12 +71,12 @@ chmod 700 "$B"
 chmod 600 "$B/master.key" "$B/vault" "$B/config.toml"
 
 # B can read A's vault immediately because passphrase protector still works.
-LIST_B=$(SECRETCTL_HOME="$B" "$BIN" list --json <<<"$PASS")
+LIST_B=$(sch "$B" list --json)
 echo "$LIST_B" | grep -q '"name":"SHARED_TOKEN"' || { echo "FAIL: B can't see SHARED_TOKEN"; exit 1; }
 echo "ok: B sees SHARED_TOKEN via cloned vault"
 
 # B adds its own keychain protector
-SECRETCTL_HOME="$B" "$BIN" key add-keychain-protector --no-touch-id <<<"$PASS" >/dev/null
+sch "$B" key add-keychain-protector --no-touch-id >/dev/null
 COUNT=$(/usr/bin/od -An -t u4 -N 4 -j 30 < "$B/master.key" | tr -d ' ')
 [[ "$COUNT" == "3" ]] || { echo "FAIL: B expected 3 protectors, got $COUNT"; exit 1; }
 echo "ok: B has 3 protectors after add-keychain-protector"
@@ -81,7 +89,7 @@ git config user.name b
 # ---------- sync no-git scenario ----------
 ROOT_NOGIT="$WORK/nogit"
 mkdir -p "$ROOT_NOGIT"
-SECRETCTL_HOME="$ROOT_NOGIT" "$BIN" init <<<"$PASS" >/dev/null
+sch "$ROOT_NOGIT" init >/dev/null
 set +e
 NOGIT_OUT="$(SECRETCTL_HOME="$ROOT_NOGIT" "$BIN" sync 2>&1)"
 NOGIT_EC=$?
@@ -103,11 +111,11 @@ echo "ok: A sync pulled B's new protector"
 
 # ---------- diverged history ----------
 # A modifies, B modifies, both commit, A pushes, B sync should fail diverged.
-printf "%s\nfrom-a-2\n" "$PASS" | SECRETCTL_HOME="$A" "$BIN" add A_ONLY --tag t >/dev/null
+printf 'from-a-2\n' | sch "$A" add A_ONLY --tag t >/dev/null
 SECRETCTL_HOME="$A" "$BIN" sync >/dev/null
 echo "ok: A pushed A_ONLY"
 
-printf "%s\nfrom-b-2\n" "$PASS" | SECRETCTL_HOME="$B" "$BIN" add B_ONLY --tag t >/dev/null
+printf 'from-b-2\n' | sch "$B" add B_ONLY --tag t >/dev/null
 # B already committed locally via add → has local commit. A's push made remote ahead.
 # B's sync flow: add -A (no-op since add already changed vault — but vault is committed?
 # Let me re-check: secretctl add modifies the vault file, doesn't commit. So B has uncommitted change.

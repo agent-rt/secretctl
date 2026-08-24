@@ -338,9 +338,8 @@ locked-screen case is as bad as it is.
    assertion. `e2e_mcp.sh` could never catch it — it always sets
    `SECRETCTL_BATCH_KEYCHAIN=1`, so the keychain unlock always succeeds and
    the fallback is never entered.
-5. **Batch-mode stdin is positional but the number of lines consumed is not**
-   (`tty.zig:120`, `cli.zig` unlock path). *Found while verifying 3 and 4; not
-   yet fixed.* In batch mode stdin is a positional script
+5. ~~**Batch-mode stdin is positional but the number of lines consumed is
+   not**~~ — **fixed.** In batch mode stdin was a positional script
    (`password\nvalue\n`), but whether the password line is read depends on
    whether the unlock actually prompts — and a warm agent cache skips it. Then
    line 1 shifts into the *value* slot. Measured on identical inputs:
@@ -352,12 +351,46 @@ locked-screen case is as bad as it is.
 
    So the master password is stored as a secret value and then written in
    plaintext into whatever `render`/`materialize` produces. This is why
-   `tests/e2e.sh` fails at "render missing GITHUB_TOKEN value" on any machine
+   `tests/e2e.sh` failed at "render missing GITHUB_TOKEN value" on any machine
    where `SECRETCTL_AGENT=1` is exported — reproduced identically on brew
-   v0.6.2, so it is not a regression. Batch mode needs a framing that does not
-   depend on unlock state: read the passphrase from a dedicated channel
-   (`SECRETCTL_PASSPHRASE_FD`), or require an explicit sentinel per field
-   rather than bare line order.
+   v0.6.2, so it was not a regression.
+
+   The agent cache was **not** the only trigger. With the agent fully off and
+   `SECRETCTL_BATCH_KEYCHAIN=1`, a keychain protector absorbs the unlock and
+   produces the same shift — measured: `TOK = hunter2hunter2`. So
+   `tests/e2e_mcp.sh`, which sets that variable, had been storing the master
+   passphrase as every secret value while still reporting a pass; it never
+   asserted on a value.
+
+   That is the argument against fixing this by disabling whatever might
+   consume the unlock. `SECRETCTL_BATCH_KEYCHAIN` was itself introduced to
+   hold the line count stable (see the comment it replaced in `cli.zig`), and
+   the v0.6.0 agent cache promptly broke it again. Two logical inputs on one
+   unframed channel cannot be made deterministic that way, so the fix gives
+   them separate channels: the passphrase comes from
+   `$SECRETCTL_PASSPHRASE_FD` and fd 0 carries only secret data. When a
+   passphrase is needed with no channel and no terminal, the command now
+   **refuses with an actionable message** rather than silently consuming a
+   line. Regression test: `tests/e2e_batch_channel.sh` asserts the stored
+   value is correct across all four agent × keychain combinations.
+6. **`prune-keychain --yes` deletes other vaults' items with no confirmation**
+   (`cli.zig` prune path). *Found the hard way while testing; not yet fixed.*
+   "Stale" is computed relative to whichever vault `$SECRETCTL_HOME` points
+   at, so running it with a test or secondary home deletes the **real** vault's
+   keychain item. There is no dry-run diff of *which* vault each item belongs
+   to, and no confirmation beyond `--yes`.
+
+   Damage is recoverable but not self-healing: `master.key` still lists the
+   `macos_keychain` protector, and the missing item surfaces as
+   `KeychainItemNotFound` (`keychain.zig:178`), which the v0.6.1 self-heal does
+   not cover — that only triggers on `InteractionRequired`. So the unlock
+   silently degrades to passphrase-only until `secretctl reinstall-keychain`
+   is run. Suggested fixes: refuse when `$SECRETCTL_HOME` is not the default
+   unless `--force`, and name the owning vault per item in the dry-run output.
+   Tests must not use it for cleanup — delete the specific account instead
+   (`tests/e2e_batch_channel.sh` shows the pattern). Note `manual_touch_id.sh`
+   still runs `security delete-generic-password -s secretctl`, which deletes
+   the first match for the service regardless of owner: same hazard.
 
 Also worth revisiting once §4.1 lands: the 3600 s TTL cap (`agent.zig:87`)
 exists to bound exposure of a cached key, which is the right instinct while

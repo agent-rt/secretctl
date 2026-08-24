@@ -37,6 +37,13 @@ pub const ExitCode = enum(u8) {
     _,
 };
 
+/// Shown when a passphrase is needed but there is neither a terminal nor a
+/// configured passphrase channel. See tty.passphraseFd for why the passphrase
+/// is never taken from fd 0 in batch mode.
+const passphrase_channel_hint =
+    "no terminal for the master password; pass it on a dedicated fd, e.g.\n" ++
+    "  SECRETCTL_PASSPHRASE_FD=3 secretctl ... 3<<<\"$PASSPHRASE\"\n";
+
 pub const usage_text =
     \\secretctl — single-binary local secret manager
     \\
@@ -66,6 +73,10 @@ pub const usage_text =
     \\  $SECRETCTL_AGENT=1 caches the unlocked master key in a background agent
     \\      so repeated commands skip the Touch ID prompt (auto-spawned).
     \\  $SECRETCTL_AGENT_TTL sets the sliding cache lifetime in seconds (default 300).
+    \\  $SECRETCTL_PASSPHRASE_FD=N reads the master passphrase from fd N instead of
+    \\      the terminal, for automation:  secretctl list 3<<<"$PASSPHRASE"
+    \\      Never from stdin: stdin carries secret values, and whether an unlock
+    \\      consumes a line depends on keychain/agent state.
     \\
 ;
 
@@ -146,15 +157,21 @@ fn runInit(allocator: std.mem.Allocator, args: []const []const u8) u8 {
         return 2;
     }
 
-    var pw = if (batch) blk: {
-        const line = tty.readLine(allocator, 4096) catch return errExit("password input failed");
-        break :blk mem_util.Plaintext.fromOwnedSlice(allocator, line);
-    } else tty.readNewPassword(allocator, 8) catch return errExit("password input failed");
+    // readNewPassword handles the batch/automation case itself, via the
+    // dedicated $SECRETCTL_PASSPHRASE_FD channel. It must not be read from
+    // fd 0: that is the secret-value channel, and sharing them is what let the
+    // master passphrase end up stored as a secret. See tty.passphraseFd.
+    var pw = tty.readNewPassword(allocator, 8) catch |e| return errExit(switch (e) {
+        tty.ReadError.PassphraseChannelRequired => "SECRETCTL_BATCH needs the passphrase on $SECRETCTL_PASSPHRASE_FD (e.g. SECRETCTL_PASSPHRASE_FD=3 ... 3<<<\"$PASS\")",
+        else => "password input failed",
+    });
     defer pw.deinit();
 
-    // Batch mode (testing) keeps Keychain off by default so that test scripts
-    // can pass `password\nvalue\n` over stdin reliably. Tests that need
-    // Keychain (e.g. MCP smoke tests) set SECRETCTL_BATCH_KEYCHAIN=1.
+    // Batch mode (testing) keeps Keychain off by default. This no longer
+    // affects how many stdin lines are consumed — the passphrase has its own
+    // channel now — but a test that wants a keychain protector must still ask
+    // for one. Tests that need Keychain (e.g. MCP smoke tests) set
+    // SECRETCTL_BATCH_KEYCHAIN=1.
     const use_keychain = if (batch)
         c_getenv("SECRETCTL_BATCH_KEYCHAIN") != null
     else
@@ -320,7 +337,10 @@ fn unlockSession(allocator: std.mem.Allocator) ?Session {
     } orelse blk: {
         // Need password.
         while (attempt < 3) : (attempt += 1) {
-            var pw = tty.readPassword(allocator, "Master password: ") catch return null;
+            var pw = tty.readPassword(allocator, "Master password: ") catch |e| {
+                if (e == tty.ReadError.PassphraseChannelRequired) tty.writeStderr(passphrase_channel_hint);
+                return null;
+            };
             defer pw.deinit();
             const result = master_key_mod.parseAndUnlock(allocator, blob, pw.bytes, &master_key, null) catch |e| switch (e) {
                 master_key_mod.Error.AuthenticationFailed => {
@@ -1439,7 +1459,10 @@ fn runKeyAddKeychainProtector(allocator: std.mem.Allocator, args: []const []cons
         else => return errExit("vault unlock failed"),
     } orelse blk: {
         tty.writeStdout("Master password required to add a new keychain protector.\n");
-        var pw = tty.readPassword(allocator, "Master password: ") catch return errExit("password input failed");
+        var pw = tty.readPassword(allocator, "Master password: ") catch |e| return errExit(switch (e) {
+            tty.ReadError.PassphraseChannelRequired => passphrase_channel_hint,
+            else => "password input failed",
+        });
         defer pw.deinit();
         break :blk master_key_mod.parseAndUnlock(allocator, blob, pw.bytes, &master_key, null) catch |e| switch (e) {
             master_key_mod.Error.AuthenticationFailed => {
@@ -1668,7 +1691,10 @@ fn runReinstallKeychain(allocator: std.mem.Allocator, args: []const []const u8) 
 
     // Force passphrase unlock (Keychain protector likely broken).
     tty.writeStdout("Master password required to rebuild Keychain protector.\n");
-    var pw = tty.readPassword(allocator, "Master password: ") catch return errExit("password input failed");
+    var pw = tty.readPassword(allocator, "Master password: ") catch |e| return errExit(switch (e) {
+        tty.ReadError.PassphraseChannelRequired => passphrase_channel_hint,
+        else => "password input failed",
+    });
     defer pw.deinit();
 
     var master_key: [aes.key_len]u8 = undefined;

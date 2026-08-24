@@ -26,6 +26,7 @@ fi
 WORK="$(mktemp -d -t secretctl-touchid-XXXXXX)"
 export SECRETCTL_HOME="$WORK/home"
 export SECRETCTL_BATCH=1
+export SECRETCTL_AGENT=0
 export SECRETCTL_BATCH_KEYCHAIN=1
 
 cleanup() {
@@ -36,9 +37,12 @@ trap cleanup EXIT
 
 PASS="touch-id-test-pass"
 
+# Passphrase on its own fd — never stdin. See tty.passphraseFd.
+sc() { SECRETCTL_PASSPHRASE_FD=3 "$BIN" "$@" 3<<<"$PASS"; }
+
 echo "===== 1. init --touch-id ====="
-echo "$PASS" | "$BIN" init --touch-id
-printf "%s\nsk-touch-id-secret\n" "$PASS" | "$BIN" add OPENAI_API_KEY --tag ai >/dev/null
+sc init --touch-id
+printf 'sk-touch-id-secret\n' | sc add OPENAI_API_KEY --tag ai >/dev/null
 echo "Vault created with Touch ID protector."
 echo
 
