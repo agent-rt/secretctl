@@ -222,15 +222,28 @@ not a prerequisite.
 > nothing, because the list is a disjunction), the recovery path, and the nudge
 > protocol extension that lets a phone release the second share.
 >
-> **Prerequisite, not an upgrade.** Measured: with the screen locked, a
-> Touch-ID-gated keychain protector cannot produce the master key even after a
-> phone has approved (`2fa-push-approval.md` §2.2b). A consent gate and a
-> biometric gate are mutually exclusive while locked, because the finger the
-> one needs is unavailable in the situation the other exists for. That leaves
-> either a keychain protector with no biometric gate, or this — where approval
-> *releases a key share* and therefore produces the key rather than authorising
-> a step that cannot then be satisfied. Everywhere these documents called this
-> "stronger but optional", they were wrong about the locked case.
+> **What this is and is not a prerequisite for.** Measured: with the screen
+> locked, a Touch-ID-gated keychain protector cannot produce the master key even
+> after a phone has approved (`2fa-push-approval.md` §2.2b). A consent gate and
+> a biometric gate are mutually exclusive while locked, because the finger the
+> one needs is unavailable in the situation the other exists for.
+>
+> Three things resolve that, not two. **Making a locked screen unlockable at all
+> is done** — a verified approval now stands in for the gate it cannot satisfy
+> (`2fa-push-approval.md` §2.2c), which needed no new protector, no new key
+> material, and cost nothing at the desk.
+>
+> What is still open is making the phone a *factor* rather than a gate our own
+> code enforces. That is this section, and it is a prerequisite for nothing
+> except itself — the security arrives only with the migration in
+> [`2of2-protector.md`](2of2-protector.md) §4, which removes the standalone
+> protectors, because the list is a disjunction (`master_key.zig:157`). That
+> migration is what takes away one-touch unlock at the desk, so it is a
+> deliberate trade rather than a step on the way.
+>
+> Both corrections came from measurement. An earlier revision of this note
+> called §4.2 the prerequisite for the locked case; that was wrong, and shipping
+> §2.2c is what showed it.
 
 New `ProtectorType.keychain_and_passphrase = 5` (values 1–3 are taken;
 `protector.zig:22`). Splitting the key, rather than nesting the wraps, is

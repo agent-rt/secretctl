@@ -1,8 +1,15 @@
 # Two-of-two protector: making the second factor cryptographic
 
-Status: **design, awaiting confirmation. No code written.** 2026-08-24.
-Implements `2fa-design.md` §4.2, which two measurements promoted from an
-option to a prerequisite.
+Status: **design. No code written.** 2026-08-24.
+Implements `2fa-design.md` §4.2.
+
+**Not needed to make a locked screen work.** That shipped separately: a verified
+approval now stands in for the biometric gate it cannot satisfy
+(`2fa-push-approval.md` §2.2c). What this document adds is making the phone a
+*cryptographic* factor instead of a gate enforced by our own code — and per §4,
+that arrives only when the standalone protectors are **removed**, which is what
+costs one-touch unlock at the desk. Read §4 before deciding to build any of
+this; it is the part that determines whether the rest buys anything.
 
 ---
 

@@ -105,6 +105,32 @@ background agent caches the unlocked master key with a sliding TTL
 (`SECRETCTL_AGENT_TTL`, default 300s). Inspect it with
 `secretctl agent status`, drop the cache with `secretctl agent stop`.
 
+## When the screen is locked
+
+Touch ID needs a finger on the sensor, so with the screen locked there is
+nothing to give it — and that is exactly when an agent is most likely to
+ask for a secret. `secretctl` detects the lock state before it touches the
+keychain or the key cache, and asks a paired phone to approve instead:
+
+```bash
+secretctl 2fa enroll     # pair a phone (scan, then confirm the fingerprint)
+secretctl 2fa status     # show the paired devices
+secretctl 2fa test       # send a test approval request
+```
+
+Without a paired device a locked screen simply refuses, and says so. The
+MCP server takes the same path, which is the point: it has no way to
+prompt for anything, so approval from another device is its only option.
+
+Set `SECRETCTL_FORCE_LOCKED=0` or `=1` to pin the lock state — needed by
+every test suite, since otherwise the result depends on whether someone
+happens to be looking at the screen.
+
+Approval is a **consent gate**, not a second cryptographic factor:
+anything already able to run code as your user can read the vault's wrap
+key directly, with or without a phone. `docs/2of2-protector.md` covers
+what making it a real factor would take, and what it would cost.
+
 ## Status
 
 v0.6.2. macOS arm64 only. Phases 1–5a shipped: vault + CLI, MCP server,

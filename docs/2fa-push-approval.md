@@ -136,20 +136,61 @@ and it means the original "screen locked and everything hangs" report was the
 **The consequence is not a nicety.** A consent gate and a Touch ID gate are
 mutually exclusive while the screen is locked, because the thing that proves a
 human consented cannot also satisfy a check that requires a finger on a sensor
-that is unavailable. So exactly two configurations make locked-screen approval
-useful:
+that is unavailable. Three configurations resolve it:
 
 1. **A keychain protector without the Touch ID gate.** Works today, as measured.
    The cost is giving up the at-the-desk biometric prompt, and M3 already shows
    that gate is an application-level `if` rather than a barrier — anything
    running as this uid can read the wrap key regardless.
-2. **The 2-of-2 protector of `2fa-design.md` §4.2.** The phone releases a key
-   share as part of approving, so approval *produces* the key instead of
-   authorising a step that then cannot be satisfied.
+2. **The 2-of-2 protector of `2fa-design.md` §4.2**, specified in
+   `2of2-protector.md`. The phone releases a key share as part of approving, so
+   approval *produces* the key instead of authorising a step that then cannot be
+   satisfied.
+3. **Keep the gate; let a verified approval stand in for it.** ← shipped, §2.2c.
+
+### 2.2c Shipped: approval stands in for the gate
+
+`keychain.Gate` is threaded into `keychain.unwrap` from the single place that
+knows an approval verified. `.approved_out_of_band` skips the biometric prompt;
+every other caller keeps `.require_biometric`, so the at-the-desk prompt is
+untouched and the two contexts stop competing for the same protector.
+
+This is the right first step rather than a shortcut past option 2, and the
+reason is worth stating because it is easy to get backwards. The gate is an
+in-process `if` before `SecItemCopyMatching`, not an ACL on the item (M3: a
+data-protection item with `kSecAccessControlBiometryAny` needs a Developer ID
+signature). Anything running as this uid reads the wrap key without going near
+LocalAuthentication. So:
+
+- Removing an *unsatisfiable* gate widens nothing. The attacker with code
+  execution never had to satisfy it.
+- **Option 2 buys nothing on its own either.** A 2of2 protector added alongside
+  the existing ones leaves the vault a disjunction — `master_key.zig:157` takes
+  the first protector that unwraps — so the phone stays bypassable until the
+  migration in `2of2-protector.md` §4 *removes* the standalone protectors. That
+  migration is a separate decision with a real cost: it is what takes away
+  one-touch unlock at the desk.
+
+So option 3 is honestly an **operational** fix, not a security upgrade: the
+locked screen goes from "approval succeeds, unlock fails anyway" to "works",
+and the threat model is exactly what it was before. Anyone reading this looking
+for the security upgrade wants §4 of `2of2-protector.md`.
+
+What this does buy, and what a bypass would have to defeat: the gate opens only
+for a verdict whose signature verified against a key pinned at pairing. Present
+push.json, unreachable service, denial, timeout, and forged verdict all leave it
+closed (`e2e_lockstate.sh`).
+
+The MCP server goes through the same decision, which is the case this work
+started from — an agent asking for a secret with nobody at the machine — and the
+one where it matters most, since an MCP server has no interactive channel at all
+and approval from another device is its only path.
 
 Every earlier note in these documents calling §4.2 "stronger but optional" is
-wrong on this point, and is corrected: for the locked-screen case it is the
-prerequisite. That was not a design insight; it came out of running the thing.
+wrong on this point, and is corrected: it is not optional *if the goal is making
+the phone a factor*. It was never the prerequisite for making a locked screen
+unlockable — that is this section. Both corrections came out of running the
+thing, not from reading it.
 
 ### 2.3 Every test suite must pin the lock state
 
