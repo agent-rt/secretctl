@@ -22,6 +22,7 @@ const clock = @import("clock.zig");
 const rand = @import("rand.zig");
 const tty = @import("tty.zig");
 const mem_util = @import("mem.zig");
+const audit = @import("audit.zig");
 
 pub const Error = error{
     NotConfigured,
@@ -605,6 +606,80 @@ pub fn buildPurpose(
     try enc.writeBool(allocator, require_device_unlock);
     try enc.writeRaw(allocator, "}");
     return enc.toOwnedSlice(allocator);
+}
+
+/// Ask a paired device to approve one unlock, reporting progress and every
+/// failure on stderr. Returns true only for an approving verdict whose
+/// signature verified against a key pinned at pairing.
+///
+/// Lives here rather than in `cli.zig` because the MCP server needs the same
+/// decision and cannot reach a private CLI helper. That matters more than the
+/// tidiness: an agent asking for a secret through MCP is the case that started
+/// this work, and an MCP server has no interactive channel at all — fd 0 is the
+/// JSON-RPC transport (`mcp_tools.unlockSession`), so approval from another
+/// device is its *only* way past a locked screen.
+///
+/// stderr is safe from both: the CLI prints there already, and for MCP stdout
+/// is the protocol channel while stderr is the server log.
+pub fn approveOrExplain(
+    allocator: std.mem.Allocator,
+    home: []const u8,
+    transport: audit.Transport,
+    /// What is being authorised, shown on the phone. Distinguishes an agent's
+    /// request from one typed at the keyboard, which is the whole reason a
+    /// human is being asked.
+    title: []const u8,
+    reason: []const u8,
+) bool {
+    var cfg = load(allocator, home) catch {
+        tty.writeStderr("cannot read push.json; run `secretctl 2fa status`\n");
+        return false;
+    };
+    defer cfg.deinit();
+
+    if (cfg.devices.len == 0) {
+        tty.writeStderr("no paired device; pair a phone first\n");
+        return false;
+    }
+
+    const purpose = buildPurpose(
+        allocator,
+        title,
+        reason,
+        &.{
+            .{ "via", transport.str() },
+            .{ "reason", reason },
+        },
+        // Releasing vault access is not a one-tap-from-a-lock-screen decision.
+        true,
+    ) catch return false;
+    defer allocator.free(purpose);
+
+    tty.writeStderr("waiting for approval on your phone…\n");
+    const verdict = requestApproval(allocator, &cfg, purpose) catch |e| {
+        switch (e) {
+            Error.Denied => tty.writeStderr("denied on the phone\n"),
+            Error.Expired => tty.writeStderr("no answer before the request expired\n"),
+            Error.ForgedVerdict => tty.writeStderr(
+                "REFUSING: the verdict was not signed by a pinned device key.\n" ++
+                    "This is not a transient error. Do not retry until you know why.\n"),
+            Error.NoPinnedDevice => tty.writeStderr("no paired device\n"),
+            else => {
+                tty.writeStderr("approval failed: ");
+                tty.writeStderr(@errorName(e));
+                tty.writeStderr("\n");
+            },
+        }
+        return false;
+    };
+
+    audit.log("authz.approved", transport, &.{
+        audit.s("device", verdict.device_fingerprint),
+    });
+    tty.writeStderr("approved by ");
+    tty.writeStderr(verdict.device_fingerprint);
+    tty.writeStderr("\n");
+    return true;
 }
 
 test "buildPurpose emits the envelope shape the PWA renders" {

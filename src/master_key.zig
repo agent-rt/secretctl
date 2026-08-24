@@ -119,6 +119,12 @@ pub fn parseAndUnlock(
     allocator: std.mem.Allocator,
     blob: []const u8,
     password: ?[]const u8,
+    /// Whether a Touch-ID-gated keychain protector may be read without
+    /// prompting because approval already arrived from another device. Only
+    /// `cli.zig` and `mcp_tools.zig` set this, and only after
+    /// `push_auth.requestApproval` returned an approving, signature-verified
+    /// verdict. See `keychain.Gate`.
+    gate: keychain_mod.Gate,
     out_master_key: *[aes.key_len]u8,
     /// Set to true if a keychain protector's item exists but its trusted-app
     /// ACL is stale (read suppressed). Lets the caller heal it. Pass null if
@@ -205,7 +211,7 @@ pub fn parseAndUnlock(
             },
             @intFromEnum(protector_mod.ProtectorType.macos_keychain) => {
                 var probe: [aes.key_len]u8 = undefined;
-                if (keychain_mod.unwrap(allocator, body_src, &mk_id, &pid, &probe)) |_| {
+                if (keychain_mod.unwrap(allocator, body_src, &mk_id, &pid, gate, &probe)) |_| {
                     @memcpy(out_master_key, &probe);
                     mem_util.secureZero(u8, &probe);
                     unlocked = true;
@@ -288,7 +294,7 @@ test "serialize -> parseAndUnlock round-trip with passphrase" {
     defer a.free(blob);
 
     var recovered: [aes.key_len]u8 = undefined;
-    var parsed = try parseAndUnlock(a, blob, "the-password", &recovered, null);
+    var parsed = try parseAndUnlock(a, blob, "the-password", .require_biometric, &recovered, null);
     defer parsed.deinit(a);
     try testing.expectEqualSlices(u8, &mk, &recovered);
     try testing.expectEqual(@as(u32, 1), parsed.master_key_version);
@@ -315,7 +321,7 @@ test "wrong password rejected" {
     defer a.free(blob);
 
     var recovered: [aes.key_len]u8 = undefined;
-    try testing.expectError(Error.AuthenticationFailed, parseAndUnlock(a, blob, "wrong", &recovered, null));
+    try testing.expectError(Error.AuthenticationFailed, parseAndUnlock(a, blob, "wrong", .require_biometric, &recovered, null));
 }
 
 test "tampered HMAC detected" {
@@ -342,5 +348,5 @@ test "tampered HMAC detected" {
     blob[blob.len - 1] ^= 0x01;
 
     var recovered: [aes.key_len]u8 = undefined;
-    try testing.expectError(Error.HmacMismatch, parseAndUnlock(a, blob, "pw", &recovered, null));
+    try testing.expectError(Error.HmacMismatch, parseAndUnlock(a, blob, "pw", .require_biometric, &recovered, null));
 }

@@ -44,6 +44,28 @@ pub const Flags = enum(u8) {
     touch_id = 0x01,
 };
 
+/// Whether `unwrap` may skip a `touch_id` body's biometric gate.
+///
+/// The gate is enforced in this process, before `SecItemCopyMatching` — it is
+/// not an ACL on the keychain item (that would need a data-protection item and
+/// a Developer ID signature; see `docs/2fa-design.md` §1.1 M3). So it protects
+/// against a careless local prompt, not against code running as this uid, which
+/// can read the item directly without going anywhere near LocalAuthentication.
+///
+/// That is what makes skipping it safe *when* out-of-band approval has already
+/// been obtained: the gate cannot be satisfied while the screen is locked
+/// (measured: it fails after 13 s, `2fa-push-approval.md` §2.2b), and removing
+/// an unsatisfiable gate widens nothing an attacker did not already have. It
+/// does not make approval a cryptographic factor — that needs the two-of-two
+/// protector *and* its migration (`docs/2of2-protector.md` §4).
+pub const Gate = enum {
+    /// Default. A `touch_id` body prompts for a fingerprint.
+    require_biometric,
+    /// Someone approved this operation from another device. Read the item
+    /// without prompting for a finger that is, by definition, not here.
+    approved_out_of_band,
+};
+
 fn buildAad(
     allocator: std.mem.Allocator,
     master_key_id: *const [16]u8,
@@ -294,6 +316,7 @@ pub fn unwrap(
     body: []const u8,
     master_key_id: *const [16]u8,
     protector_id: *const [16]u8,
+    gate: Gate,
     out_master_key: *[aes.key_len]u8,
 ) Error!void {
     if (body.len < 2) return Error.MalformedBody;
@@ -309,7 +332,11 @@ pub fn unwrap(
     // Touch ID gate: prompt for biometric auth before reading the keychain.
     // On cancel/failure, surface as AuthenticationFailed so the caller falls
     // back to the next protector (passphrase).
-    if (body_flags == @intFromEnum(Flags.touch_id)) {
+    //
+    // Skipped when approval already arrived from another device. See `Gate` for
+    // why that is not a downgrade, and why it is the only thing that makes a
+    // locked screen unlockable at all.
+    if (body_flags == @intFromEnum(Flags.touch_id) and gate == .require_biometric) {
         const ok = local_auth.evaluate("Unlock secretctl vault");
         if (!ok) return Error.AuthenticationFailed;
     }
@@ -438,7 +465,7 @@ test "wrap/unwrap round-trip via real Keychain" {
     defer p.deinit(a);
 
     var recovered: [aes.key_len]u8 = undefined;
-    try unwrap(a, p.body, &mk_id, &p.id, &recovered);
+    try unwrap(a, p.body, &mk_id, &p.id, .require_biometric, &recovered);
     try testing.expectEqualSlices(u8, &mk, &recovered);
 }
 
@@ -457,5 +484,54 @@ test "unwrap with wrong protector_id fails" {
     var fake_pid: [16]u8 = undefined;
     rand.bytes(&fake_pid);
     var recovered: [aes.key_len]u8 = undefined;
-    try testing.expectError(Error.AuthenticationFailed, unwrap(a, p.body, &mk_id, &fake_pid, &recovered));
+    try testing.expectError(Error.AuthenticationFailed, unwrap(a, p.body, &mk_id, &fake_pid, .require_biometric, &recovered));
+}
+
+test "out-of-band approval reads a Touch-ID-gated body without prompting" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    // This is the whole locked-screen fix, and it is testable precisely because
+    // a passing run must involve no human: under `.require_biometric` the same
+    // body would raise an LA prompt, which in a test run nobody answers. So a
+    // green result here means the gate really was skipped, not merely that the
+    // unwrap succeeded.
+    const a = testing.allocator;
+    var mk: [aes.key_len]u8 = undefined;
+    rand.bytes(&mk);
+    var mk_id: [16]u8 = undefined;
+    rand.bytes(&mk_id);
+    defer deleteFor(&mk_id) catch {};
+
+    var p = try wrapWithFlags(a, &mk, &mk_id, .touch_id);
+    defer p.deinit(a);
+    // Guard the premise: if the body were not actually flagged there would be
+    // no gate to skip and the test would prove nothing.
+    try testing.expectEqual(@intFromEnum(Flags.touch_id), p.body[body_magic_v2.len]);
+
+    var recovered: [aes.key_len]u8 = undefined;
+    try unwrap(a, p.body, &mk_id, &p.id, .approved_out_of_band, &recovered);
+    try testing.expectEqualSlices(u8, &mk, &recovered);
+}
+
+test "skipping the gate does not skip the AEAD" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    // Approval replaces a gate on *who may ask*, never the binding between a
+    // body and its vault. Without this, `.approved_out_of_band` could quietly
+    // become a way to unwrap a protector lifted from another master.key.
+    const a = testing.allocator;
+    var mk: [aes.key_len]u8 = undefined;
+    rand.bytes(&mk);
+    var mk_id: [16]u8 = undefined;
+    rand.bytes(&mk_id);
+    defer deleteFor(&mk_id) catch {};
+
+    var p = try wrapWithFlags(a, &mk, &mk_id, .touch_id);
+    defer p.deinit(a);
+
+    var other_mk_id: [16]u8 = undefined;
+    rand.bytes(&other_mk_id);
+    var recovered: [aes.key_len]u8 = undefined;
+    try testing.expectError(
+        Error.AuthenticationFailed,
+        unwrap(a, p.body, &other_mk_id, &p.id, .approved_out_of_band, &recovered),
+    );
 }

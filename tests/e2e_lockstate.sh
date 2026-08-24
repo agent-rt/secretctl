@@ -92,6 +92,60 @@ fi
 "$BIN" agent stop >/dev/null 2>&1 || true
 export SECRETCTL_AGENT=0
 
+# ---------- configured but unreachable: still refuses ----------
+# Approval is what lets a locked screen skip the biometric gate
+# (keychain.Gate), so the gate must open only for a verdict that actually
+# verified. Merely *having* push.json must not be enough — otherwise dropping a
+# file into $SECRETCTL_HOME would be the whole 2FA bypass.
+#
+# 127.0.0.1:1 is https (http.zig refuses anything else before connecting) and
+# refuses the connection immediately, so this stays fast and offline.
+cat > "$SECRETCTL_HOME/push.json" <<'JSON'
+{
+  "worker_url": "https://127.0.0.1:1",
+  "app_id": "app-e2e",
+  "client_id": "client-e2e",
+  "client_secret": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "timeout_s": 5,
+  "devices": [
+    {"device_id": "dev-e2e", "sign_pubkey": "AAAA", "seal_pubkey": "AAAA",
+     "fingerprint": "0000-0000-0000-0000", "label": "not a real phone"}
+  ]
+}
+JSON
+chmod 600 "$SECRETCTL_HOME/push.json"
+
+set +e
+out=$(locked list --json 2>&1); rc=$?
+set -e
+if [[ $rc -ne 0 ]]; then
+  ok "locked + unreachable approval service: refuses (rc=$rc)"
+else
+  bad "an unreachable approval service still unlocked" "$out"
+fi
+grep -q '"name":"TOK"' <<<"$out" \
+  && bad "secret leaked without an approved verdict" "${out:0:160}" \
+  || ok "locked + unreachable: no vault contents in the output"
+grep -qi "master password" <<<"$out" \
+  && bad "locked + configured: fell through to a passphrase prompt" "${out:0:160}" \
+  || ok "locked + configured: still no passphrase prompt"
+
+rm -f "$SECRETCTL_HOME/push.json"
+
+# The same must hold for the MCP server, which is the case that started this:
+# an agent asks for a secret with nobody at the machine.
+set +e
+out=$(SECRETCTL_FORCE_LOCKED=1 "$BIN" mcp --cwd "$WORK" <<<'{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_secrets","arguments":{}}}' 2>&1); rc=$?
+set -e
+if grep -q '"name":"TOK"' <<<"$out"; then
+  bad "mcp served vault contents while locked" "${out:0:200}"
+else
+  ok "locked: mcp does not serve vault contents"
+fi
+grep -q "2fa enroll" <<<"$out" \
+  && ok "locked: mcp names the command that would fix it" \
+  || bad "mcp gave no actionable hint while locked" "${out:0:200}"
+
 # ---------- the override fails closed ----------
 set +e
 out=$(SECRETCTL_FORCE_LOCKED=yes SECRETCTL_PASSPHRASE_FD=3 "$BIN" list --json 3<<<"$PASS" 2>&1); rc=$?
