@@ -18,6 +18,11 @@ B="$WORK/host-b"
 BARE="$WORK/origin.git"
 mkdir -p "$A" "$B"
 export SECRETCTL_BATCH=1
+# Pin the screen-lock state. Without this the suite passes or fails depending
+# on whether a human happens to be looking at the screen: the authorization
+# gate refuses every unlock while locked, which is correct behaviour and
+# useless as a test variable.
+export SECRETCTL_FORCE_LOCKED=0
 export SECRETCTL_AGENT=0
 
 cleanup() {

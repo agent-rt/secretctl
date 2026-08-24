@@ -75,7 +75,22 @@ wrap key directly. The gate is a consent prompt, not a cryptographic barrier.
   fd 0 — under MCP that consumes a JSON-RPC frame as the password.
 - **The cache TTL is capped at 3600 s.** `agent.zig:87`.
 
-### 1.3 Not yet measured — the one open question
+### 1.3 Measured after all — and it was not the hang
+
+Originally the one open question: what `LAContext` does while the screen is
+locked. Answered by `2fa-push-approval.md` §2.2b, with two vaults, a real
+locked screen and no passphrase fallback available: a Touch-ID-gated keychain
+protector **fails in 13 s**, it does not hang.
+
+So the unbounded wait in `local_auth.m:49` was never the cause of the original
+"everything hangs while locked" symptom — that was the passphrase prompt with
+no TTY, fixed separately. §5 item 1 stands as defence in depth rather than as
+the fix, and item 2 is close to moot.
+
+The larger consequence is in §4.2 below, which this promotes from an option to
+a prerequisite.
+
+### 1.3.1 The original wording, kept for the record
 
 What `LAContext` does while the screen is locked:
 
@@ -200,6 +215,16 @@ not a prerequisite.
 > factor.
 
 ### 4.2 Protector type 5 — two-of-two
+
+> **Prerequisite, not an upgrade.** Measured: with the screen locked, a
+> Touch-ID-gated keychain protector cannot produce the master key even after a
+> phone has approved (`2fa-push-approval.md` §2.2b). A consent gate and a
+> biometric gate are mutually exclusive while locked, because the finger the
+> one needs is unavailable in the situation the other exists for. That leaves
+> either a keychain protector with no biometric gate, or this — where approval
+> *releases a key share* and therefore produces the key rather than authorising
+> a step that cannot then be satisfied. Everywhere these documents called this
+> "stronger but optional", they were wrong about the locked case.
 
 New `ProtectorType.keychain_and_passphrase = 5` (values 1–3 are taken;
 `protector.zig:22`). Splitting the key, rather than nesting the wraps, is

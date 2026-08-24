@@ -26,6 +26,11 @@ trap 'rm -rf "$WORK"' EXIT
 export SECRETCTL_HOME="$WORK/home"
 PROJECT="$WORK/project"
 mkdir -p "$PROJECT"
+# Pin the screen-lock state. Without this the suite passes or fails depending
+# on whether a human happens to be looking at the screen: the authorization
+# gate refuses every unlock while locked, which is correct behaviour and
+# useless as a test variable.
+export SECRETCTL_FORCE_LOCKED=0
 PASS="hunter2hunter2"
 
 # Passphrase on its own fd — never stdin. See tty.passphraseFd.

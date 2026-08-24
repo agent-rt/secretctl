@@ -240,6 +240,26 @@ fn readSecret(allocator: std.mem.Allocator, prompt: []const u8, mask: bool) Read
     return mem_util.Plaintext.fromOwnedSlice(allocator, owned);
 }
 
+/// Read one line from the fd named by `env_name`, e.g. $SECRETCTL_ENROL_FD.
+///
+/// The same mechanism as the passphrase channel and for the same reason: a
+/// secret handed over in argv is readable by any process via ps. Generalised
+/// rather than copied so there is one implementation of "read a secret from a
+/// dedicated fd" — terminal editing semantics are off, because this is a data
+/// channel and a token may legitimately contain any byte.
+pub fn readFromFdEnv(
+    allocator: std.mem.Allocator,
+    env_name: [*:0]const u8,
+) ReadError!mem_util.Plaintext {
+    const v = getenv(env_name) orelse return ReadError.PassphraseChannelRequired;
+    const s = std.mem.span(v);
+    if (s.len == 0) return ReadError.PassphraseChannelRequired;
+    const fd = std.fmt.parseInt(c_int, s, 10) catch return ReadError.PassphraseChannelRequired;
+    if (fd < 0) return ReadError.PassphraseChannelRequired;
+    const line = try readLineFrom(allocator, fd, 4096, false);
+    return mem_util.Plaintext.fromOwnedSlice(allocator, line);
+}
+
 /// Prompt for a password twice; require equal inputs and minimum length.
 pub fn readNewPassword(
     allocator: std.mem.Allocator,

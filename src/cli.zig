@@ -22,6 +22,8 @@ const editor_mod = @import("editor.zig");
 const envelope_mod = @import("envelope.zig");
 const mcp_mod = @import("mcp.zig");
 const local_auth = @import("local_auth.zig");
+const authz = @import("authz.zig");
+const push_auth = @import("push_auth.zig");
 const clock_mod = @import("clock.zig");
 const agent_mod = @import("agent.zig");
 extern "c" fn dup2(oldfd: c_int, newfd: c_int) c_int;
@@ -67,12 +69,16 @@ pub const usage_text =
     \\  secretctl reinstall-keychain [--no-touch-id]   # rebuild keychain protector
     \\  secretctl prune-keychain [--yes]     # remove stale secretctl keychain items from old vaults
     \\  secretctl agent [run|status|stop]    # cache the unlocked key to skip repeat Touch ID
+    \\  secretctl 2fa [enroll|status|test]    # approve from a phone when the screen is locked
     \\
     \\ENV:
     \\  $VISUAL / $EDITOR control which editor `edit` and `add --editor` launch.
     \\  $SECRETCTL_AGENT=1 caches the unlocked master key in a background agent
     \\      so repeated commands skip the Touch ID prompt (auto-spawned).
     \\  $SECRETCTL_AGENT_TTL sets the sliding cache lifetime in seconds (default 300).
+    \\  $SECRETCTL_FORCE_LOCKED=1 treats the screen as locked (0 as unlocked), which
+    \\      is the only way to exercise the locked-screen authorization path without
+    \\      actually locking the screen.
     \\  $SECRETCTL_PASSPHRASE_FD=N reads the master passphrase from fd N instead of
     \\      the terminal, for automation:  secretctl list 3<<<"$PASSPHRASE"
     \\      Never from stdin: stdin carries secret values, and whether an unlock
@@ -112,6 +118,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) u8 {
     if (std.mem.eql(u8, cmd, "reinstall-keychain")) return runReinstallKeychain(allocator, tail);
     if (std.mem.eql(u8, cmd, "prune-keychain")) return runPruneKeychain(allocator, tail);
     if (std.mem.eql(u8, cmd, "agent")) return runAgent(allocator, tail);
+    if (std.mem.eql(u8, cmd, "2fa")) return runTwoFactor(allocator, tail);
 
     tty.writeStderr("unknown command: ");
     tty.writeStderr(cmd);
@@ -299,6 +306,34 @@ fn unlockSession(allocator: std.mem.Allocator) ?Session {
 
     const blob = fsx.readAllAlloc(allocator, p.master_key, 1 * 1024 * 1024) catch return null;
     defer allocator.free(blob);
+
+    // Decide which authorization method applies BEFORE the agent cache and the
+    // keychain. See authz.decide() for why the order is load-bearing: below the
+    // cache, locking the screen would leave an hour-long window needing no
+    // approval at all.
+    const authz_decision = authz.decide();
+    if (authz_decision.method == .out_of_band) {
+        if (!authz.outOfBandConfigured(p.home)) {
+            // Fail closed, and say which of the two things is missing: nobody
+            // is at the machine, and there is no way to ask them.
+            tty.writeStderr("cannot authorize: ");
+            tty.writeStderr(authz_decision.reason);
+            tty.writeStderr("\n");
+            tty.writeStderr(authz.not_configured_hint);
+            return null;
+        }
+        if (!requestPhoneApproval(allocator, p.home, authz_decision.reason)) return null;
+        // Approved. Fall through to the normal unlock: approval authorises the
+        // operation, it does not hand over the key. The keychain protector
+        // still has to produce it, so a stolen approval on its own is worth
+        // nothing.
+        //
+        // The Touch ID gate inside the keychain protector cannot be satisfied
+        // while locked, so the keychain read is attempted with the biometric
+        // prompt suppressed and falls back to the passphrase path only if one
+        // is available — which, unattended, it is not. That is why an approved
+        // request can still fail to unlock, and why the message says so.
+    }
 
     var master_key: [aes.key_len]u8 = undefined;
     var attempt: u32 = 0;
@@ -1393,6 +1428,205 @@ fn runMcp(allocator: std.mem.Allocator, args: []const []const u8) u8 {
         }
     }
     return mcp_mod.serve(allocator, .{ .cwd = cwd, .dangerous = dangerous });
+}
+
+
+// ------- 2fa (out-of-band approval) -------
+
+/// Ask a paired phone to approve this unlock. Returns true only on a verdict
+/// whose signature verified against a pinned key.
+///
+/// Every failure path returns false. There is deliberately no branch that
+/// treats an error as approval: a network problem, a forged signature and a
+/// timeout are all "no".
+fn requestPhoneApproval(
+    allocator: std.mem.Allocator,
+    home: []const u8,
+    reason: []const u8,
+) bool {
+    var cfg = push_auth.load(allocator, home) catch {
+        tty.writeStderr("cannot read push.json; run `secretctl 2fa status`\n");
+        return false;
+    };
+    defer cfg.deinit();
+
+    if (cfg.devices.len == 0) {
+        tty.writeStderr("no paired device; pair a phone first\n");
+        return false;
+    }
+
+    const purpose = push_auth.buildPurpose(
+        allocator,
+        "secretctl · unlock vault",
+        reason,
+        &.{
+            .{ "host", "this Mac" },
+            .{ "reason", reason },
+        },
+        // Releasing vault access is not a one-tap-from-a-lock-screen decision.
+        true,
+    ) catch return false;
+    defer allocator.free(purpose);
+
+    tty.writeStderr("waiting for approval on your phone…\n");
+    const verdict = push_auth.requestApproval(allocator, &cfg, purpose) catch |e| {
+        switch (e) {
+            push_auth.Error.Denied => tty.writeStderr("denied on the phone\n"),
+            push_auth.Error.Expired => tty.writeStderr("no answer before the request expired\n"),
+            push_auth.Error.ForgedVerdict => tty.writeStderr(
+                "REFUSING: the verdict was not signed by a pinned device key.\n" ++
+                "This is not a transient error. Do not retry until you know why.\n"),
+            push_auth.Error.NoPinnedDevice => tty.writeStderr("no paired device\n"),
+            else => {
+                tty.writeStderr("approval failed: ");
+                tty.writeStderr(@errorName(e));
+                tty.writeStderr("\n");
+            },
+        }
+        return false;
+    };
+
+    audit_mod.log("authz.approved", .cli, &.{
+        audit_mod.s("device", verdict.device_fingerprint),
+    });
+    tty.writeStderr("approved by ");
+    tty.writeStderr(verdict.device_fingerprint);
+    tty.writeStderr("\n");
+    return true;
+}
+
+fn runTwoFactor(allocator: std.mem.Allocator, args: []const []const u8) u8 {
+    if (args.len == 0) {
+        tty.writeStderr("usage: secretctl 2fa [enroll|status|test]\n");
+        return 2;
+    }
+    var p = paths_mod.resolve(allocator) catch return errExit("cannot resolve paths");
+    defer p.deinit();
+
+    if (std.mem.eql(u8, args[0], "status")) {
+        var cfg = push_auth.load(allocator, p.home) catch {
+            tty.writeStdout("out-of-band approval: not configured\n");
+            tty.writeStdout(authz.not_configured_hint);
+            return 1;
+        };
+        defer cfg.deinit();
+
+        tty.writeStdout("worker:  ");
+        tty.writeStdout(cfg.worker_url);
+        tty.writeStdout("\nclient:  ");
+        tty.writeStdout(cfg.client_id);
+        tty.writeStdout("\n");
+
+        // Refresh so a device paired since last time gets pinned, and so a
+        // substituted key is caught here rather than mid-unlock.
+        const r = push_auth.refreshDevices(allocator, p.home, &cfg) catch |e| {
+            if (e == push_auth.Error.KeySubstituted) {
+                tty.writeStderr(
+                    "\nREFUSING: a pinned device's key changed.\n" ++
+                    "Keys do not change in place, so this is a substitution, not an update.\n");
+                return 1;
+            }
+            tty.writeStderr("could not reach the service: ");
+            tty.writeStderr(@errorName(e));
+            tty.writeStderr("\n");
+            return 1;
+        };
+        if (!r.paired) {
+            tty.writeStdout("devices: none paired yet\n");
+            return 1;
+        }
+        tty.writeStdout("devices:\n");
+        for (cfg.devices) |d| {
+            tty.writeStdout("  ");
+            tty.writeStdout(d.fingerprint);
+            tty.writeStdout("  ");
+            tty.writeStdout(d.label);
+            tty.writeStdout("\n");
+        }
+        tty.writeStdout("\nCompare each fingerprint against what that phone shows.\n");
+        return 0;
+    }
+
+    if (std.mem.eql(u8, args[0], "enroll")) {
+        // The enrolment token comes from whoever administers the service. It is
+        // read from a dedicated fd rather than argv, for the same reason the
+        // master passphrase is: argv is world-readable via ps.
+        var worker: []const u8 = "";
+        var app_id: []const u8 = "";
+        var label: []const u8 = "mac";
+        var i: usize = 1;
+        while (i < args.len) : (i += 1) {
+            if (std.mem.eql(u8, args[i], "--worker") and i + 1 < args.len) {
+                i += 1;
+                worker = args[i];
+            } else if (std.mem.eql(u8, args[i], "--app-id") and i + 1 < args.len) {
+                i += 1;
+                app_id = args[i];
+            } else if (std.mem.eql(u8, args[i], "--label") and i + 1 < args.len) {
+                i += 1;
+                label = args[i];
+            } else {
+                tty.writeStderr("usage: secretctl 2fa enroll --worker URL --app-id ID [--label NAME]\n");
+                tty.writeStderr("  the enrolment token is read from $SECRETCTL_ENROL_FD\n");
+                return 2;
+            }
+        }
+        if (worker.len == 0 or app_id.len == 0) {
+            tty.writeStderr("usage: secretctl 2fa enroll --worker URL --app-id ID [--label NAME]\n");
+            return 2;
+        }
+        var token = tty.readFromFdEnv(allocator, "SECRETCTL_ENROL_FD") catch {
+            tty.writeStderr("enrolment token must be supplied on a dedicated fd, e.g.\n" ++
+                "  SECRETCTL_ENROL_FD=3 secretctl 2fa enroll --worker … --app-id … 3<<<\"$TOKEN\"\n");
+            return 2;
+        };
+        defer token.deinit();
+
+        const e = push_auth.enroll(allocator, p.home, worker, app_id, token.bytes, label) catch |err| {
+            tty.writeStderr("enrolment failed: ");
+            tty.writeStderr(@errorName(err));
+            tty.writeStderr("\n");
+            return 1;
+        };
+        tty.writeStdout("enrolled. Open the PWA and enter this pairing code:\n\n    ");
+        tty.writeStdout(e.code());
+        tty.writeStdout("\n\nThen run `secretctl 2fa status` and compare the fingerprint it prints\n");
+        tty.writeStdout("against the one shown on the phone. If they differ, something\n");
+        tty.writeStdout("substituted a key — do not approve anything.\n");
+        return 0;
+    }
+
+    if (std.mem.eql(u8, args[0], "test")) {
+        // A full round trip that touches no secret, so the path can be checked
+        // without putting a real unlock behind it.
+        var cfg = push_auth.load(allocator, p.home) catch {
+            tty.writeStderr(authz.not_configured_hint);
+            return 1;
+        };
+        defer cfg.deinit();
+        const purpose = push_auth.buildPurpose(allocator, "secretctl · test",
+            "approval test, no secret involved", &.{
+                .{ "command", "secretctl 2fa test" },
+            }, false) catch return errExit("out of memory");
+        defer allocator.free(purpose);
+
+        tty.writeStderr("waiting for approval on your phone…\n");
+        const v = push_auth.requestApproval(allocator, &cfg, purpose) catch |e| {
+            tty.writeStderr("test failed: ");
+            tty.writeStderr(@errorName(e));
+            tty.writeStderr("\n");
+            return 1;
+        };
+        tty.writeStdout("approved by ");
+        tty.writeStdout(v.device_fingerprint);
+        tty.writeStdout("\n");
+        return 0;
+    }
+
+    tty.writeStderr("unknown 2fa subcommand: ");
+    tty.writeStderr(args[0]);
+    tty.writeStderr("\n");
+    return 2;
 }
 
 // ------- key (sub-dispatcher) -------

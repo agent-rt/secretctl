@@ -19,6 +19,11 @@ fi
 WORK="$(mktemp -d -t secretctl-mcp-e2e-XXXXXX)"
 export SECRETCTL_HOME="$WORK/home"
 export SECRETCTL_BATCH=1
+# Pin the screen-lock state. Without this the suite passes or fails depending
+# on whether a human happens to be looking at the screen: the authorization
+# gate refuses every unlock while locked, which is correct behaviour and
+# useless as a test variable.
+export SECRETCTL_FORCE_LOCKED=0
 export SECRETCTL_AGENT=0
 export SECRETCTL_BATCH_KEYCHAIN=1     # MCP unlock needs keychain protector
 PROJECT="$WORK/project"

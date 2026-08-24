@@ -27,6 +27,11 @@ if [[ ! -x "$BIN" ]]; then
   exit 1
 fi
 
+# Pin the screen-lock state. Without this the suite passes or fails depending
+# on whether a human happens to be looking at the screen: the authorization
+# gate refuses every unlock while locked, which is correct behaviour and
+# useless as a test variable.
+export SECRETCTL_FORCE_LOCKED=0
 PASS="hunter2hunter2"
 VALUE="sk-real-secret-value"
 FAILED=0
