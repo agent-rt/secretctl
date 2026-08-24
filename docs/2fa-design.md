@@ -216,6 +216,12 @@ not a prerequisite.
 
 ### 4.2 Protector type 5 — two-of-two
 
+> **Specified in [`2of2-protector.md`](2of2-protector.md).** That document
+> carries the wire format, the migration (which is where the security actually
+> happens — a 2of2 protector added *alongside* the existing ones changes
+> nothing, because the list is a disjunction), the recovery path, and the nudge
+> protocol extension that lets a phone release the second share.
+>
 > **Prerequisite, not an upgrade.** Measured: with the screen locked, a
 > Touch-ID-gated keychain protector cannot produce the master key even after a
 > phone has approved (`2fa-push-approval.md` §2.2b). A consent gate and a
