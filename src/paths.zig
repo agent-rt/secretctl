@@ -46,10 +46,38 @@ pub fn resolve(allocator: std.mem.Allocator) !Paths {
 
 const testing = std.testing;
 
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+
 test "resolve uses HOME by default" {
+    // Pinned, because this asserts the *default* and $SECRETCTL_HOME overrides
+    // it: with that variable exported — which anyone driving a test vault has
+    // done — this failed for a reason that had nothing to do with the code.
+    // Same discipline as the e2e suites pinning SECRETCTL_FORCE_LOCKED.
+    const saved = std.c.getenv("SECRETCTL_HOME");
+    defer if (saved) |v| {
+        _ = setenv("SECRETCTL_HOME", v, 1);
+    } else {
+        _ = unsetenv("SECRETCTL_HOME");
+    };
+    _ = unsetenv("SECRETCTL_HOME");
+
     const a = testing.allocator;
     var p = try resolve(a);
     defer p.deinit();
     try testing.expect(std.mem.endsWith(u8, p.home, "/.secretctl"));
     try testing.expect(std.mem.endsWith(u8, p.vault, "/.secretctl/vault"));
+}
+
+test "SECRETCTL_HOME overrides the default" {
+    // The override had no test at all, which is why nothing noticed that the
+    // one above depended on it being unset.
+    defer _ = unsetenv("SECRETCTL_HOME");
+    _ = setenv("SECRETCTL_HOME", "/tmp/secretctl-paths-test", 1);
+
+    const a = testing.allocator;
+    var p = try resolve(a);
+    defer p.deinit();
+    try testing.expectEqualStrings("/tmp/secretctl-paths-test", p.home);
+    try testing.expectEqualStrings("/tmp/secretctl-paths-test/vault", p.vault);
 }
