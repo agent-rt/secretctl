@@ -63,7 +63,11 @@ cd "$A"
 git init -q -b main
 git add -A
 git -c user.email=a@example -c user.name=a commit -q -m "init from A"
-git --bare init -q "$BARE"
+# -b main, not the host default: `git --bare init` inherits
+# init.defaultBranch, so on a machine set to "master" the bare HEAD points
+# at a ref this suite never creates, and the clone below checks out nothing.
+# The symptom is three chmod failures, not a git error.
+git --bare init -q -b main "$BARE"
 git remote add origin "$BARE"
 git push -q -u origin main
 echo "ok: A pushed to bare origin"
