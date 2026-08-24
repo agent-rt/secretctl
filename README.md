@@ -113,10 +113,21 @@ ask for a secret. `secretctl` detects the lock state before it touches the
 keychain or the key cache, and asks a paired phone to approve instead:
 
 ```bash
-secretctl 2fa enroll     # pair a phone (scan, then confirm the fingerprint)
-secretctl 2fa status     # show the paired devices
-secretctl 2fa test       # send a test approval request
+# The enrolment token goes on its own fd, never argv — `ps` is world-readable.
+SECRETCTL_ENROL_FD=3 secretctl 2fa enroll \
+  --worker https://your-approval-service.example --app-id secretctl \
+  --label "this mac" 3<<<"$TOKEN"
+
+secretctl 2fa status     # show paired devices; compare fingerprints with the phone
+secretctl 2fa test       # a full round trip that touches no secret
 ```
+
+This needs an **approval service you run yourself** — the relay that holds
+the request and pushes it to your phone. `secretctl` treats it as
+untrusted: every verdict is verified against a device key pinned at
+pairing, so a service that fabricates an approval produces a signature
+this refuses. The reference implementation is not published yet;
+`docs/2fa-push-approval.md` is the wire protocol if you want to write one.
 
 Without a paired device a locked screen simply refuses, and says so. The
 MCP server takes the same path, which is the point: it has no way to
