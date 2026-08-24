@@ -15,6 +15,14 @@ Relationship to TECH-DESIGN: this adds one protector type (§3.x) and one
 agent opcode family. Nothing here alters §2.2 (master.key layout) or §4.1
 (vault layout).
 
+**How to read this after the fact.** Parts have been overtaken by
+`2fa-push-approval.md`, which specifies what was actually built. What has not
+been overtaken, and is the reason to keep this document: the measurements in
+§1, the security model in §2 — cited by that document to justify calling itself
+a consent gate rather than a factor — and §4.2, the 2-of-2 protector, which is
+still the only design for real cryptographic 2FA here and is unbuilt. Each
+superseded section says so at its head.
+
 ---
 
 ## 1. Evidence
@@ -125,7 +133,22 @@ options; see §4.1.
 
 ## 4. Design
 
+**What in here is still the plan.** §4.2 (the 2-of-2 protector) is the only
+route to a genuine second cryptographic factor and is unimplemented; push
+approval does not replace it, because a consent gate leaves the key reachable
+by one factor. §4.4 and §4.5 are live. §4.1, §4.3 and §4.6 are superseded as
+mechanisms by `2fa-push-approval.md` and carry notes saying so — §4.1's
+*reasoning* still stands and is why that design looks the way it does.
+
 ### 4.1 The structural move: approval is out-of-band from the requester
+
+> **Superseded as a mechanism, not as a reason.** The insight below — that
+> approval must not be prompted for by the requesting process — is what the
+> whole push design rests on. The specific mechanism, promoting `agent.zig`
+> into a local broker with a `secretctl approve` CLI, is not being built: the
+> out-of-band channel is now the phone (`2fa-push-approval.md`), and the Mac
+> side is one blocking HTTPS GET rather than a local rendezvous. Read this
+> section for why, not for what to implement.
 
 The reason R1 is hard has nothing to do with cryptography. When the operator
 is remote, the process that needs the key is an **agent process on the Mac**,
@@ -241,6 +264,11 @@ whether to prompt, rather than prompting only after a keychain miss.
 
 ### 4.3 Second factor in v1: the passphrase
 
+> **Not the chosen v1.** Push approval is (`2fa-push-approval.md`). This
+> section stays because it remains the cheapest *cryptographic* second factor
+> and the natural companion to §4.2 — push approval is a consent gate and does
+> not make the key 2-of-2, so if that is ever wanted, this is still the design.
+
 The passphrase is already implemented, already remote-typeable over SSH, and
 requires no new hardware, service, or phone app. Combined with §4.1 it
 satisfies R1 and R2 together:
@@ -295,6 +323,19 @@ approval front-end; nothing else changes. Transport options, cheapest first:
 
 Deferred deliberately: it is a service plus phone-side work, and §4.1 + §4.3
 already remove the urgency.
+
+**Superseded in part.** The chosen direction is not the phone-held *share*
+described above but a lock-conditional **consent gate**: Touch ID while
+someone is at the machine, phone approval over a Cloudflare Workers relay when
+the screen is locked. Specified in **[`2fa-push-approval.md`](2fa-push-approval.md)**.
+
+Note what that trades away. A gate that only applies when locked cannot be a
+cryptographic factor, because Touch-ID-at-the-desk remains an unconditional
+path to the key and M3 shows the Mac can take that path without any
+interaction. So the push flow defends against *absence* — an agent wanting
+keys while nobody is there — not against code execution as this uid. The
+2-of-2 protector in §4.2 is still the thing that would make it a real factor,
+and it remains unimplemented.
 
 ---
 
