@@ -8,18 +8,26 @@ get *capability* access — they run commands with secrets injected via
 environment variables, but never see plaintext.
 
 ```bash
-secretctl init                                # passphrase + macOS Keychain
-secretctl add OPENAI_API_KEY --tag ai         # TUI (single line)
+secretctl init                                # passphrase + Touch ID keychain
+secretctl add OPENAI_API_KEY --tag ai         # prompt (single line, masked)
 secretctl add SSH_KEY --tag ssh --editor      # $EDITOR (multi-line)
-secretctl edit OPENAI_API_KEY                  # rotate via $EDITOR
+secretctl add APNS_KEY --file AuthKey.p8      # exact bytes (also --stdin)
+secretctl edit OPENAI_API_KEY                 # rotate via $EDITOR
+secretctl tag OPENAI_API_KEY ai,prod          # replace tags, no re-encrypt
 
 secretctl list --json                         # name+tags only, no value
 secretctl exec --tag ai -- python main.py     # env-injected, audited
 secretctl render .npmrc.tmpl --out ~/.npmrc   # ${NAME} substitution
+secretctl materialize SSH_KEY --out ~/.ssh/id_ed25519 --mode 0600
 
+secretctl mcp                                 # MCP server over stdio
+secretctl sync                                # git pull/commit/push the vault
 secretctl reveal NPM_TOKEN                    # show plaintext on TTY only
 secretctl rm STALE_TOKEN
 ```
+
+`secretctl --help` lists every command and flag; the binary's help is the
+authoritative reference.
 
 ## Why
 
@@ -41,14 +49,68 @@ secretctl rm STALE_TOKEN
 brew install agent-rt/tap/secretctl  # macOS arm64 (Apple Silicon) only
 ```
 
-Or download the tarball for your arch from the
+Or download the tarball from the
 [Releases page](https://github.com/agent-rt/secretctl/releases).
+
+### Nix / Home Manager
+
+The flake builds from source via `zig-overlay` — no tarball, no
+`sha256` to keep in sync. It exposes `packages.default`,
+`overlays.default` (attaches `pkgs.secretctl`), and
+`homeManagerModules.default`:
+
+```nix
+inputs.secretctl.url = "github:agent-rt/secretctl";
+
+programs.secretctl = {
+  enable = true;
+  envSecrets.API_TOKEN = { };                         # -> ~/.config/secretctl/env.sh
+  fileSecrets.SSH_KEY = { path = ".ssh/id_ed25519"; mode = "0600"; };
+  agent.enable = true;                                # sets $SECRETCTL_AGENT
+};
+
+programs.zsh.initExtra = "source ~/.config/secretctl/env.sh";
+```
+
+The module is a declarative wrapper around `secretctl materialize` that
+runs at *activation* time — nothing is decrypted during Nix evaluation.
+It assumes `secretctl init` has already run and the secrets exist in the
+vault. See `nix/home-manager.nix` for all options.
+
+Homebrew and Nix are independent update tracks: bumping one does not
+move the other.
+
+## Touch ID and the key cache
+
+`init` installs a Touch ID–gated Keychain protector by default
+(`--no-touch-id` opts out). Two commands exist for when that protector
+drifts out of sync with the binary:
+
+```bash
+secretctl reinstall-keychain     # rebuild the protector for the current binary
+secretctl prune-keychain         # list stale items from old vaults; --yes to delete
+```
+
+A re-signed binary invalidates the trusted-app ACL, so an upgrade can
+make the Keychain start prompting. `secretctl` self-heals this on read
+since v0.6.1; `reinstall-keychain` is the manual escape hatch.
+
+On a second Mac sharing the vault over `secretctl sync`, run
+`secretctl key add-keychain-protector` once to add that machine's own
+keychain unlock path. The vault header holds a list of protectors: the
+passphrase, plus one keychain entry per machine.
+
+To avoid one Touch ID prompt per command, set `SECRETCTL_AGENT=1` — a
+background agent caches the unlocked master key with a sliding TTL
+(`SECRETCTL_AGENT_TTL`, default 300s). Inspect it with
+`secretctl agent status`, drop the cache with `secretctl agent stop`.
 
 ## Status
 
-v0.1.0 — Phase 1 MVP. macOS only. See `tests/e2e.sh` for behavior
-contract. Phase 2+ will add MCP server, Touch ID protector, NixOS
-materialize hook (in priority order).
+v0.6.2. macOS arm64 only. Phases 1–5a shipped: vault + CLI, MCP server,
+Touch ID–gated unlock, `materialize` + Home Manager module, and
+cross-Mac vault sync over git. See `tests/e2e.sh`, `tests/e2e_mcp.sh`,
+and `tests/e2e_sync.sh` for the behavior contract.
 
 ## License
 
