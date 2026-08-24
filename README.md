@@ -20,7 +20,6 @@ secretctl exec --tag ai -- python main.py     # env-injected, audited
 secretctl render .npmrc.tmpl --out ~/.npmrc   # ${NAME} substitution
 secretctl materialize SSH_KEY --out ~/.ssh/id_ed25519 --mode 0600
 
-secretctl mcp                                 # MCP server over stdio
 secretctl sync                                # git pull/commit/push the vault
 secretctl reveal NPM_TOKEN                    # show plaintext on TTY only
 secretctl rm STALE_TOKEN
@@ -32,15 +31,16 @@ authoritative reference.
 ## Why
 
 - **Agent-first**: a project-local `.secretctl.toml` allowlist gates
-  which secrets reach which commands. Agents cannot inject secrets
-  into arbitrary shell commands or read plaintext (`run_with_secrets`
-  capability model rather than `get_secret`).
+  which secrets reach which commands. An agent runs
+  `secretctl exec --tag ai -- <allowlisted command>` and the secrets
+  arrive in the child's environment; it never handles plaintext itself,
+  and it cannot widen the allowlist from outside the file.
 - **Encrypted metadata**: secret names, tags, and timestamps are
   inside the AEAD body. `strings(1)` on the vault file shows nothing
   useful — stronger than SOPS' field-level encryption.
 - **Zero ambient state**: no `.env` files, no shell history, no
   process arguments. CLI rejects `secretctl add NAME value`.
-- **One binary**: macOS arm64 (Apple Silicon), ~600 KB, no runtime
+- **One binary**: macOS arm64 (Apple Silicon), ~900 KB, no runtime
   dependencies (Security.framework + libc are system-provided).
 
 ## Install
@@ -105,11 +105,11 @@ background agent caches the unlocked master key with a sliding TTL
 (`SECRETCTL_AGENT_TTL`, default 120s). Inspect it with
 `secretctl agent status`, drop the cache with `secretctl agent stop`.
 
-`reveal` does **not** use the cache, and neither does the MCP server — both
-hand plaintext straight to whoever asked, so they always cost a fresh Touch
-ID (or phone approval while locked). Cached unlocks are recorded in the
-audit log as `unlock.cached`, so afterwards you can tell which unlocks a
-human authorized from which ones the cache served for free.
+`reveal` does **not** use the cache — it hands plaintext straight to
+whoever asked, so it always costs a fresh Touch ID (or phone approval while
+locked). Cached unlocks are recorded in the audit log as `unlock.cached`, so
+afterwards you can tell which unlocks a human authorized from which ones the
+cache served for free.
 
 `exec`, `render` and `materialize` do still use the cache. That is a
 deliberate trade, not an oversight — they are the bulk of normal use, and
@@ -141,9 +141,7 @@ pairing, so a service that fabricates an approval produces a signature
 this refuses. The reference implementation is not published yet;
 `docs/2fa-push-approval.md` is the wire protocol if you want to write one.
 
-Without a paired device a locked screen simply refuses, and says so. The
-MCP server takes the same path, which is the point: it has no way to
-prompt for anything, so approval from another device is its only option.
+Without a paired device a locked screen simply refuses, and says so.
 
 Set `SECRETCTL_FORCE_LOCKED=0` or `=1` to pin the lock state — needed by
 every test suite, since otherwise the result depends on whether someone
@@ -159,21 +157,29 @@ that does and does not mean, measured rather than assumed:
   do. With the screen locked that means phone approval.
 - The gap: with the screen **unlocked and the key cache warm**
   (`SECRETCTL_AGENT=1`), a local caller can get a secret through `exec` with
-  no prompt at all. `reveal` and MCP `get_secret` are excluded from the
-  cache, so they always cost fresh authorization — but `exec` is not, which
-  narrows the gap rather than closing it. The TTL (default 120s) is what
-  bounds it; `SECRETCTL_AGENT=0` closes it at one prompt per command.
+  no prompt at all. `reveal` is excluded from the cache, so it always
+  costs fresh authorization — but `exec` is not, which narrows the gap
+  rather than closing it. The TTL (default 120s) is what bounds it;
+  `SECRETCTL_AGENT=0` closes it at one prompt per command.
 
 `docs/2fa-design.md` §1 carries the measurements; `docs/2of2-protector.md`
 specifies a real second factor and records why it is not being built.
 
 ## Status
 
-v0.7.0. macOS arm64 only. Shipped: vault + CLI, MCP server, Touch ID–gated
-unlock, `materialize` + Home Manager module, cross-Mac vault sync over git,
-and out-of-band approval when the screen is locked. See `tests/e2e.sh`,
-`tests/e2e_mcp.sh`, `tests/e2e_sync.sh`, and `tests/e2e_lockstate.sh` for
-the behavior contract.
+v0.7.0. macOS arm64 only. Shipped: vault + CLI, Touch ID–gated unlock,
+`materialize` + Home Manager module, cross-Mac vault sync over git, and
+out-of-band approval when the screen is locked. See `tests/e2e.sh`,
+`tests/e2e_sync.sh`, and `tests/e2e_lockstate.sh` for the behavior
+contract.
+
+**The MCP server was removed in v0.7.0.** If you were running
+`secretctl mcp`, point the agent at the CLI instead: `secretctl exec`
+covers the same capability model — the `.secretctl.toml` allowlist is
+enforced there too, so nothing about which secrets reach which commands
+changes. `list`, `exec` and the allowlist were what the three safe tools
+wrapped; `get_secret` has no CLI equivalent by design, and `reveal` is
+TTY-only.
 
 The locked-screen path is verified end to end for everything that does not
 need hardware: a real screen, a real phone, and a push round trip are

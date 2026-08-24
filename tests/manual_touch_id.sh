@@ -4,7 +4,7 @@
 #
 # Walks through:
 #   1. Touch ID-gated unlock (`init --touch-id` then `list`)
-#   2. MCP dangerous mode `get_secret` via mcpctl (per-call Touch ID)
+#   2. cancelling the prompt, and the audit log afterwards
 #
 # Run from a real terminal (interactive). Cleanup on exit.
 
@@ -61,52 +61,7 @@ set -e
 echo "exit=$EC (expected 1 since password fallback also fails in batch mode)"
 echo
 
-if ! command -v mcpctl >/dev/null 2>&1; then
-  echo "mcpctl not installed — skipping MCP dangerous mode tests"
-  exit 0
-fi
-
-echo "===== 4. MCP dangerous mode startup ====="
-PROJECT="$WORK/project"
-mkdir -p "$PROJECT"
-cat > "$PROJECT/.secretctl.toml" <<'EOF'
-[allow]
-tags = ["ai"]
-commands = ["echo"]
-EOF
-
-export XDG_CONFIG_HOME="$WORK/.config"
-mkdir -p "$XDG_CONFIG_HOME/mcpctl"
-cat > "$XDG_CONFIG_HOME/mcpctl/mcp.json" <<EOF
-{
-  "mcpServers": {
-    "secretctl_dangerous": {
-      "command": "$BIN",
-      "args": ["mcp", "--allow-secret-read", "--cwd", "$PROJECT"],
-      "env": {
-        "SECRETCTL_HOME": "$SECRETCTL_HOME",
-        "SECRETCTL_BATCH": "1",
-        "SECRETCTL_BATCH_KEYCHAIN": "1"
-      }
-    }
-  }
-}
-EOF
-
-echo "Listing tools (should show 4: + get_secret)"
-mcpctl introspect secretctl_dangerous --json 2>/dev/null | jq -r '.tools[].name'
-echo
-echo "===== 5. get_secret — Touch ID prompt expected ====="
-echo "Place finger when prompted; should return value."
-mcpctl secretctl_dangerous/get_secret --args-json '{"name":"OPENAI_API_KEY"}'
-echo
-
-echo "===== 6. get_secret cancel — press Cancel on next Touch ID prompt ====="
-mcpctl secretctl_dangerous/get_secret --args-json '{"name":"OPENAI_API_KEY"}' || true
-echo "(Should be isError: true with biometric authentication declined)"
-echo
-
-echo "===== 7. audit log inspection ====="
+echo "===== 4. audit log inspection ====="
 LOG=~/Library/Logs/secretctl.log
 echo "Last 5 audit lines:"
 tail -n 5 "$LOG" | jq -c .
@@ -118,4 +73,4 @@ fi
 echo "ok: no value leaks in audit log"
 
 echo
-echo "Manual Phase 3 verification complete. Inspect outputs above for correctness."
+echo "Manual Touch ID verification complete. Inspect outputs above for correctness."

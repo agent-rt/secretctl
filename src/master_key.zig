@@ -121,7 +121,7 @@ pub fn parseAndUnlock(
     password: ?[]const u8,
     /// Whether a Touch-ID-gated keychain protector may be read without
     /// prompting because approval already arrived from another device. Only
-    /// `cli.zig` and `mcp_tools.zig` set this, and only after
+    /// Only `cli.zig` sets this, and only after
     /// `push_auth.requestApproval` returned an approving, signature-verified
     /// verdict. See `keychain.Gate`.
     gate: keychain_mod.Gate,

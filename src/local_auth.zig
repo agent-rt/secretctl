@@ -1,6 +1,6 @@
-//! LocalAuthentication bridge — biometric (Touch ID) prompt for unlock and
-//! `get_secret`. The actual ObjC code lives in `local_auth.m`; this file is
-//! a thin extern wrapper plus a Zig-friendly API.
+//! LocalAuthentication bridge — the biometric (Touch ID) prompt for vault
+//! unlock. The actual ObjC code lives in `local_auth.m`; this file is a thin
+//! extern wrapper plus a Zig-friendly API.
 //!
 //! Why ObjC: the LAContext API uses Objective-C blocks for its async reply,
 //! and dispatch_semaphore to pin it down to a synchronous call. Hand-rolling

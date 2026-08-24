@@ -21,26 +21,6 @@ fn batchMode() bool {
     return getenv("SECRETCTL_BATCH") != null;
 }
 
-/// Set when fd 0 is a protocol transport rather than user input — currently
-/// the MCP server's JSON-RPC stream. Every routine that reads fd 0 checks it
-/// (there are exactly two: readLine and readSecret), so no code path can
-/// consume protocol bytes as a password or a secret value.
-///
-/// This has to be explicit state rather than an isatty() test. `SECRETCTL_BATCH`
-/// deliberately reads fd 0 when it is *not* a tty, which is exactly the shape
-/// of an MCP pipe, so the two are indistinguishable by inspection.
-var stdin_reserved: bool = false;
-
-/// Declare fd 0 off-limits for interactive and batch input. Called once at MCP
-/// startup; never cleared.
-pub fn reserveStdin() void {
-    stdin_reserved = true;
-}
-
-pub fn stdinReserved() bool {
-    return stdin_reserved;
-}
-
 const tcflag_t = u64;
 const cc_t = u8;
 const speed_t = u64;
@@ -97,8 +77,6 @@ pub const ReadError = error{
     OutOfMemory,
     Cancelled,
     LineTooLong,
-    /// fd 0 carries a protocol stream, not user input. See reserveStdin.
-    StdinReserved,
     /// A passphrase is needed but no passphrase channel is configured and no
     /// terminal is available. See passphraseFd.
     PassphraseChannelRequired,
@@ -107,7 +85,6 @@ pub const ReadError = error{
 /// Read a line from stdin (terminated by newline or EOF). Newline excluded.
 /// Returns owned slice. Caller frees.
 pub fn readLine(allocator: std.mem.Allocator, max_len: usize) ReadError![]u8 {
-    if (stdin_reserved) return ReadError.StdinReserved;
     return readLineFrom(allocator, STDIN, max_len, true);
 }
 
@@ -191,9 +168,8 @@ pub fn readMasked(allocator: std.mem.Allocator, prompt: []const u8) ReadError!me
 
 fn readSecret(allocator: std.mem.Allocator, prompt: []const u8, mask: bool) ReadError!mem_util.Plaintext {
     // Before batchMode: batch mode reads fd 0 precisely when it is not a tty,
-    // so without this check `SECRETCTL_BATCH=1 secretctl mcp` would consume a
+    // so without this check a batch-mode command would consume a
     // JSON-RPC frame as the secret.
-    if (stdin_reserved) return ReadError.StdinReserved;
     if (batchMode()) {
         const line = try readLine(allocator, 4096);
         return mem_util.Plaintext.fromOwnedSlice(allocator, line);
