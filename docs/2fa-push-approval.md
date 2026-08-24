@@ -220,7 +220,7 @@ environment silently becomes an input.
 
 At the **top of the unlock path**, before the agent cache and before the
 keychain. This matters: the agent cache holds the master key for
-`$SECRETCTL_AGENT_TTL` (default 300 s, up to 3600 s), so if the check came
+`$SECRETCTL_AGENT_TTL` (default 120 s, up to 3600 s), so if the check came
 after the cache, locking the screen would leave a window in which no approval
 is required at all. Checking first makes the gate independent of cache state.
 
