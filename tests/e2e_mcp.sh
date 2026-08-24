@@ -19,6 +19,7 @@ fi
 WORK="$(mktemp -d -t secretctl-mcp-e2e-XXXXXX)"
 export SECRETCTL_HOME="$WORK/home"
 export SECRETCTL_BATCH=1
+export SECRETCTL_AGENT=0
 export SECRETCTL_BATCH_KEYCHAIN=1     # MCP unlock needs keychain protector
 PROJECT="$WORK/project"
 mkdir -p "$PROJECT"
@@ -49,11 +50,17 @@ trap cleanup EXIT
 
 PASS="hunter2hunter2"
 
+# The master passphrase goes on its own fd, never on stdin: stdin is the
+# secret-value channel, and whether an unlock consumes a stdin line depends on
+# keychain/agent state, so sharing them silently stored the passphrase as a
+# secret value. See tty.passphraseFd.
+sc() { SECRETCTL_PASSPHRASE_FD=3 "$BIN" "$@" 3<<<"$PASS"; }
+
 # ---------- vault setup ----------
-echo "$PASS" | "$BIN" init >/dev/null
-printf "%s\nsk-test-openai\n" "$PASS" | "$BIN" add OPENAI_API_KEY --tag ai >/dev/null
-printf "%s\nnpm-test-token\n" "$PASS" | "$BIN" add NPM_TOKEN --tag npm >/dev/null
-printf "%s\nghp-test-token\n" "$PASS" | "$BIN" add GITHUB_TOKEN --tag github >/dev/null
+sc init >/dev/null
+printf 'sk-test-openai\n' | sc add OPENAI_API_KEY --tag ai >/dev/null
+printf 'npm-test-token\n' | sc add NPM_TOKEN --tag npm >/dev/null
+printf 'ghp-test-token\n' | sc add GITHUB_TOKEN --tag github >/dev/null
 
 cat > "$PROJECT/.secretctl.toml" <<'EOF'
 [allow]

@@ -99,24 +99,42 @@ pub const ReadError = error{
     LineTooLong,
     /// fd 0 carries a protocol stream, not user input. See reserveStdin.
     StdinReserved,
+    /// A passphrase is needed but no passphrase channel is configured and no
+    /// terminal is available. See passphraseFd.
+    PassphraseChannelRequired,
 };
 
 /// Read a line from stdin (terminated by newline or EOF). Newline excluded.
 /// Returns owned slice. Caller frees.
 pub fn readLine(allocator: std.mem.Allocator, max_len: usize) ReadError![]u8 {
     if (stdin_reserved) return ReadError.StdinReserved;
+    return readLineFrom(allocator, STDIN, max_len, true);
+}
+
+/// Read one newline-terminated line from `fd`. With `editing` the byte stream
+/// is interpreted the way a terminal would (backspace erases, Ctrl-D
+/// cancels); without it, bytes are taken literally, which is what a data
+/// channel needs — a passphrase may legitimately contain 0x7f.
+fn readLineFrom(
+    allocator: std.mem.Allocator,
+    fd: c_int,
+    max_len: usize,
+    editing: bool,
+) ReadError![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
     var c: [1]u8 = undefined;
     while (true) {
-        const n = read(STDIN, &c, 1);
+        const n = read(fd, &c, 1);
         if (n < 0) return ReadError.ReadFailed;
         if (n == 0) break; // EOF
         if (c[0] == '\n') break;
-        if (c[0] == 4) return ReadError.Cancelled; // Ctrl-D
-        if (c[0] == 0x7f or c[0] == 0x08) {
-            if (buf.items.len > 0) _ = buf.pop();
-            continue;
+        if (editing) {
+            if (c[0] == 4) return ReadError.Cancelled; // Ctrl-D
+            if (c[0] == 0x7f or c[0] == 0x08) {
+                if (buf.items.len > 0) _ = buf.pop();
+                continue;
+            }
         }
         if (buf.items.len >= max_len) return ReadError.LineTooLong;
         buf.append(allocator, c[0]) catch return ReadError.OutOfMemory;
@@ -124,11 +142,43 @@ pub fn readLine(allocator: std.mem.Allocator, max_len: usize) ReadError![]u8 {
     return buf.toOwnedSlice(allocator);
 }
 
+/// Dedicated passphrase channel: $SECRETCTL_PASSPHRASE_FD=N reads the master
+/// passphrase from fd N.
+///
+/// Why this exists. Batch mode used to take the passphrase from fd 0 as the
+/// first line, followed by the secret value — but whether that first line is
+/// consumed at all depends on unlock state, because a keychain protector or a
+/// warm agent cache satisfies the unlock without any passphrase. When that
+/// happens the value slot silently reads the *passphrase* line, so the master
+/// passphrase gets stored as a secret and then written out in plaintext by
+/// `render`/`materialize`. Confirmed on v0.6.2 via both triggers.
+///
+/// `SECRETCTL_BATCH_KEYCHAIN` was an attempt to hold the line count stable by
+/// disabling the keychain; the agent cache (v0.6.0) then broke it again. Two
+/// logical inputs on one unframed channel cannot be made deterministic by
+/// disabling whatever might consume one of them, so they get separate
+/// channels instead: passphrase on this fd, secret data on fd 0.
+fn passphraseFd() ?c_int {
+    const v = getenv("SECRETCTL_PASSPHRASE_FD") orelse return null;
+    const s = std.mem.span(v);
+    if (s.len == 0) return null;
+    const n = std.fmt.parseInt(c_int, s, 10) catch return null;
+    if (n < 0) return null;
+    return n;
+}
+
 /// Read a password. stdin must be a tty. Echo is suppressed entirely (no
 /// length is leaked on screen) and the buffer is returned as a Plaintext that
 /// securely zeros on deinit. Newline ends the input; backspace deletes the
 /// previous byte; Ctrl-C/Ctrl-D cancel.
 pub fn readPassword(allocator: std.mem.Allocator, prompt: []const u8) ReadError!mem_util.Plaintext {
+    if (passphraseFd()) |fd| {
+        const line = try readLineFrom(allocator, fd, 4096, false);
+        return mem_util.Plaintext.fromOwnedSlice(allocator, line);
+    }
+    // Deliberately not fd 0: see passphraseFd. Failing here is the point —
+    // the alternative is silently consuming a line of secret data.
+    if (batchMode()) return ReadError.PassphraseChannelRequired;
     return readSecret(allocator, prompt, false);
 }
 
@@ -195,10 +245,11 @@ pub fn readNewPassword(
     allocator: std.mem.Allocator,
     min_len: usize,
 ) ReadError!mem_util.Plaintext {
-    if (batchMode()) {
-        const line = try readLine(allocator, 4096);
+    if (passphraseFd()) |fd| {
+        const line = try readLineFrom(allocator, fd, 4096, false);
         return mem_util.Plaintext.fromOwnedSlice(allocator, line);
     }
+    if (batchMode()) return ReadError.PassphraseChannelRequired;
     while (true) {
         var p1 = try readPassword(allocator, "Master password: ");
         if (p1.len() < min_len) {

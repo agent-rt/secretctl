@@ -28,12 +28,15 @@ PROJECT="$WORK/project"
 mkdir -p "$PROJECT"
 PASS="hunter2hunter2"
 
-# SECRETCTL_BATCH without SECRETCTL_BATCH_KEYCHAIN => passphrase-only vault.
-# SECRETCTL_AGENT=0 so the batch stdin script stays positionally stable (a warm
-# agent cache skips the password prompt and shifts every subsequent line).
+# Passphrase on its own fd — never stdin. See tty.passphraseFd.
+sc() { SECRETCTL_BATCH=1 SECRETCTL_PASSPHRASE_FD=3 "$BIN" "$@" 3<<<"$PASS"; }
+
+# SECRETCTL_BATCH without SECRETCTL_BATCH_KEYCHAIN => passphrase-only vault, so
+# the MCP server's keychain unlock cannot succeed. Agent off for hermeticity
+# only: the passphrase has its own fd, so unlock state no longer shifts stdin.
 export SECRETCTL_AGENT=0
-echo "$PASS" | SECRETCTL_BATCH=1 "$BIN" init >/dev/null
-printf "%s\nsk-test-openai\n" "$PASS" | SECRETCTL_BATCH=1 "$BIN" add OPENAI_API_KEY --tag ai >/dev/null
+sc init >/dev/null
+printf 'sk-test-openai\n' | sc add OPENAI_API_KEY --tag ai >/dev/null
 
 cat > "$PROJECT/.secretctl.toml" <<'EOF'
 [allow]
