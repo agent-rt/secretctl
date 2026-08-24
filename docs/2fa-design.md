@@ -17,11 +17,21 @@ agent opcode family. Nothing here alters §2.2 (master.key layout) or §4.1
 
 **How to read this after the fact.** Parts have been overtaken by
 `2fa-push-approval.md`, which specifies what was actually built. What has not
-been overtaken, and is the reason to keep this document: the measurements in
-§1, the security model in §2 — cited by that document to justify calling itself
-a consent gate rather than a factor — and §4.2, the 2-of-2 protector, which is
-still the only design for real cryptographic 2FA here and is unbuilt. Each
-superseded section says so at its head.
+been overtaken, and is the reason to keep this document: the measurements in §1
+and the security model in §2 they support. §4.2, the 2-of-2 protector, is still
+the only design here for real cryptographic 2FA and is **deliberately not being
+built** — the head of §4 says why. Each superseded section says so at its head.
+
+**One warning if you are here to reuse the reasoning.** M3 was over-read for
+most of this document's life: a measurement of `secretctl` reading its own
+keychain item was written up as "any process running as this uid can read the
+wrap key", and that inference became the security argument for §4.2, reached the
+public README and a `keychain.zig` doc comment as fact, and survived several
+revisions of documents whose whole point was to be evidence-tagged. M5 finally
+measured it and it was false. The tagging convention did its job — the claim was
+labelled as measured when only its narrower ancestor was — so treat every
+"measured" tag here as covering exactly what the Method column says and nothing
+adjacent to it.
 
 ---
 
@@ -39,20 +49,36 @@ design turns on the difference between "the keychain enforces it" and "an
 | M2 | This vault has exactly two protectors: `passphrase` (type 1) and `macos_keychain` (type 2), the latter with body flags `0x01` (`Flags.touch_id`). | `xxd` over `~/.secretctl/master.key`, decoded against the §2.2 layout |
 | M3 | The keychain wrap key reads out with **interaction explicitly forbidden**: `SecItemCopyMatching` with `kSecUseAuthenticationUIFail` returns `errSecSuccess` and 32 bytes. | Purpose-built ObjC probe against the real item (`service=secretctl`, `account=hex(mk_id)`) |
 | M4 | The agent cache is active with a 300 s sliding TTL. | `SECRETCTL_AGENT=1`, `SECRETCTL_AGENT_TTL=300` in the environment |
+| M5 | A binary **other than** the one the item's ACL trusts **cannot** read the wrap key. Interaction suppressed → `errSecAuthFailed` (-25293); interaction allowed → blocks on a dialog. | The same ObjC probe as M3, plus `/usr/bin/security`, against both a fresh test item and the real vault's item |
 
-**M3 is the load-bearing measurement.** The Touch ID requirement is not
-enforced by the keychain item's access control. It is enforced by
-`keychain.zig:313`:
+**M3 is the load-bearing measurement, and M5 bounds it.** The Touch ID
+requirement is not enforced by the keychain item's access control. It is
+enforced by `keychain.zig`:
 
 ```zig
-if (body_flags == @intFromEnum(Flags.touch_id)) {
+if (body_flags == @intFromEnum(Flags.touch_id) and gate == .require_biometric) {
     const ok = local_auth.evaluate("Unlock secretctl vault");
     if (!ok) return Error.AuthenticationFailed;
 }
 ```
 
-Any process running as this user can skip that branch entirely and read the
-wrap key directly. The gate is a consent prompt, not a cryptographic barrier.
+So for **`secretctl` itself** the gate is a consent prompt, not a cryptographic
+barrier: the branch is skippable code, and M3 shows the read underneath it
+succeeds with interaction forbidden.
+
+**An earlier revision of this section drew a much larger conclusion from M3 —
+"any process running as this user can skip that branch and read the wrap key
+directly" — and M5 falsifies it.** M3 measured `secretctl` reading its own item.
+Generalising that to any process was an inference, not a measurement, and it was
+wrong: the legacy trusted-app ACL does stop a foreign binary. The distinction
+matters because that inference was the entire security argument for §4.2, and it
+had also reached the README and a `keychain.zig` doc comment as a statement of
+fact before anyone checked it.
+
+What M3 + M5 together actually say: the perimeter is **the ACL plus whatever
+gates `secretctl` applies before it reads**. A hostile process cannot take the
+wrap key; it has to ask `secretctl` for it, and then it meets those gates. §1.4
+measures which of them it can walk through.
 
 ### 1.2 Read from the source (certain, not measured)
 
@@ -87,8 +113,9 @@ So the unbounded wait in `local_auth.m:49` was never the cause of the original
 no TTY, fixed separately. §5 item 1 stands as defence in depth rather than as
 the fix, and item 2 is close to moot.
 
-The larger consequence is in §4.2 below, which this promotes from an option to
-a prerequisite.
+The larger consequence went to §4.2 below. An earlier revision said this
+"promotes §4.2 from an option to a prerequisite"; §2.2c of
+`2fa-push-approval.md` and M5 between them retired that. See the head of §4.
 
 ### 1.3.1 The original wording, kept for the record
 
@@ -106,27 +133,57 @@ are broken differently and want different fixes — see §5.
 The probe for this is written and needs an operator to lock the screen while
 it runs. Until it is run, §5 items 1 and 2 are provisional.
 
+### 1.4 Measured: what a hostile local process can actually do
+
+M5 says a hostile process cannot take the wrap key, so it has to ask
+`secretctl`. Measured against a test vault, with a canary secret and the
+`reveal` path:
+
+| condition | result |
+|---|---|
+| screen unlocked, agent cache cold | Touch ID prompt — the attacker needs a finger, and the prompt is visible |
+| **screen unlocked, agent cache warm** | **`TOK = sk-canary-value`. No Touch ID, no passphrase, no phone.** |
+| screen locked, agent cache warm | refused at the authorization gate |
+
+**The middle row is the only gap a hostile local process can walk straight
+through, and it is the everyday configuration** — `$SECRETCTL_AGENT=1` exists
+precisely so the honest path does not prompt per command (M4).
+
+Note what closes it and what does not. The locked row is closed because
+`authz.decide()` runs *above* the cache. **A cryptographic second factor does
+not close the unlocked row**: the agent caches `mk` itself, so any scheme that
+changes how `mk` is *derived* — §4.2 included — is bypassed by a warm cache for
+the length of its TTL. Its own §9 Q4 admits this. Narrowing what the cache
+serves, or to whom, is a different piece of work and the one that touches this
+row.
+
 ---
 
 ## 2. What the current security model actually is
 
-From M2, M3 and the disjunction in §1.2:
+From M2, M5 and the disjunction in §1.2:
 
 ```
-mk  =  passphrase   OR   (ability to execute code as this uid on this Mac)
+mk  =  passphrase   OR   (the ACL-trusted secretctl binary, past its gates)
 ```
 
-That is **1-of-2, not 2FA.** And the second disjunct is exactly what an agent
-running on this machine already has. The only thing standing between a
-compromised or merely careless agent and the master key is the `if` in
-`keychain.zig:313`, which is not a security boundary against code running as
-the user.
+The second disjunct is **not** "ability to execute code as this uid" — that was
+the earlier wording, and M5 falsified it. A hostile process as this uid cannot
+read the wrap key; it can only invoke `secretctl` and meet the gates. §1.4
+measures which of those it gets past, and the answer is one: a warm agent cache
+with the screen unlocked.
 
-The consequence for this design: **a second factor is only worth adding if it
-is cryptographically load-bearing.** Another consent `if` — a TOTP check, a
-confirmation prompt — adds friction to the honest path without moving the
-adversary's cost. This rules out a whole family of otherwise appealing cheap
-options; see §4.1.
+So the honest characterisation is not "1-of-2, not 2FA". It is: **the perimeter
+is the ACL plus the gates, and the gates have one measured hole that is not a
+cryptography problem.** That reframing changes what is worth building — see the
+note at the head of §4 — because a second cryptographic factor addresses the
+disjunct that M5 says is already closed, and not the hole that is open.
+
+What survives from the original reasoning: **a second factor is only worth
+adding if it is cryptographically load-bearing.** Another consent `if` adds
+friction to the honest path without moving the adversary's cost. That still
+rules out the family of cheap options in §4.1. It just no longer implies that
+the expensive option is therefore worth it.
 
 ---
 
@@ -148,12 +205,33 @@ options; see §4.1.
 
 ## 4. Design
 
-**What in here is still the plan.** §4.2 (the 2-of-2 protector) is the only
-route to a genuine second cryptographic factor and is unimplemented; push
-approval does not replace it, because a consent gate leaves the key reachable
-by one factor. §4.4 and §4.5 are live. §4.1, §4.3 and §4.6 are superseded as
-mechanisms by `2fa-push-approval.md` and carry notes saying so — §4.1's
-*reasoning* still stands and is why that design looks the way it does.
+**What in here is still the plan.** §4.4 and §4.5 are live. §4.1, §4.3 and §4.6
+are superseded as mechanisms by `2fa-push-approval.md` and carry notes saying
+so — §4.1's *reasoning* still stands and is why that design looks the way it
+does.
+
+**§4.2 (the 2-of-2 protector) is not being built.** Decided 2026-08-24, on
+measurement rather than taste. It remains the only design here for a genuine
+second cryptographic factor, and that is still an accurate description of it;
+what changed is the estimate of what that buys:
+
+- Its security argument was that the keychain half needs only code execution as
+  this uid. **M5 falsified that.** A hostile process cannot read the wrap key at
+  all; the ACL stops it.
+- The one gap that measurement *did* find (§1.4: warm agent cache, screen
+  unlocked) is **not closed by 2of2**, because the agent caches `mk` itself.
+- What it would still buy is narrower: offline attack on a stolen or imaged Mac,
+  where someone has the disk and the login keychain but not the phone. Plus
+  defence in depth if the ACL is ever bypassed.
+- What it costs is unchanged and concrete: the migration must *remove* the
+  standalone protectors or the disjunction makes it theatre, and that removes
+  one-touch Touch ID at the desk. Plus recovery words whose loss is vault loss,
+  and `S_mac` as a new single point of failure next to a `prune-keychain`
+  hazard that has already bitten once.
+
+`2of2-protector.md` keeps the full specification, so this is a reversible
+decision and not a lost design. The work that *does* touch §1.4's open row is
+scoping the agent cache — see §5.
 
 ### 4.1 The structural move: approval is out-of-band from the requester
 
@@ -233,17 +311,20 @@ not a prerequisite.
 > (`2fa-push-approval.md` §2.2c), which needed no new protector, no new key
 > material, and cost nothing at the desk.
 >
-> What is still open is making the phone a *factor* rather than a gate our own
-> code enforces. That is this section, and it is a prerequisite for nothing
-> except itself — the security arrives only with the migration in
-> [`2of2-protector.md`](2of2-protector.md) §4, which removes the standalone
-> protectors, because the list is a disjunction (`master_key.zig:157`). That
-> migration is what takes away one-touch unlock at the desk, so it is a
-> deliberate trade rather than a step on the way.
+> What remained was making the phone a *factor* rather than a gate our own code
+> enforces. **That is this section, and it is not being built** — see the head
+> of §4 for the reasoning, which is M5 and §1.4: the threat it was aimed at is
+> already closed by the keychain ACL, and the gap that is actually open is not
+> one a cryptographic factor closes.
 >
-> Both corrections came from measurement. An earlier revision of this note
-> called §4.2 the prerequisite for the locked case; that was wrong, and shipping
-> §2.2c is what showed it.
+> The specification below and in `2of2-protector.md` is kept intact, because the
+> decision rests on a measurement of *this* setup and would deserve revisiting
+> if that changed — a machine without the ACL barrier, or a threat model
+> centred on a stolen disk.
+>
+> Three corrections reached this note, all from measurement, none from review:
+> §4.2 was never the prerequisite for the locked case; §2.2c is; and the premise
+> that made §4.2 look necessary was an over-read of M3.
 
 New `ProtectorType.keychain_and_passphrase = 5` (values 1–3 are taken;
 `protector.zig:22`). Splitting the key, rather than nesting the wraps, is
@@ -374,12 +455,17 @@ someone is at the machine, phone approval over a Cloudflare Workers relay when
 the screen is locked. Specified in **[`2fa-push-approval.md`](2fa-push-approval.md)**.
 
 Note what that trades away. A gate that only applies when locked cannot be a
-cryptographic factor, because Touch-ID-at-the-desk remains an unconditional
-path to the key and M3 shows the Mac can take that path without any
-interaction. So the push flow defends against *absence* — an agent wanting
-keys while nobody is there — not against code execution as this uid. The
-2-of-2 protector in §4.2 is still the thing that would make it a real factor,
-and it remains unimplemented.
+cryptographic factor, because Touch-ID-at-the-desk remains an unconditional path
+to the key and M3 shows this binary can take that path without any interaction.
+So the push flow defends against *absence* — an agent wanting keys while nobody
+is there.
+
+What it does not defend against is a caller that reaches `secretctl` while the
+operator *is* there, and §1.4 measures how far that gets: a warm agent cache
+serves it with no prompt at all. That, not code execution as such, is the open
+row — M5 shows a hostile process cannot bypass `secretctl` to reach the wrap key
+directly. §4.2 would not close it either, which is part of why §4.2 is not being
+built.
 
 ---
 

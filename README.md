@@ -137,10 +137,21 @@ Set `SECRETCTL_FORCE_LOCKED=0` or `=1` to pin the lock state — needed by
 every test suite, since otherwise the result depends on whether someone
 happens to be looking at the screen.
 
-Approval is a **consent gate**, not a second cryptographic factor:
-anything already able to run code as your user can read the vault's wrap
-key directly, with or without a phone. `docs/2of2-protector.md` covers
-what making it a real factor would take, and what it would cost.
+Approval is a **consent gate**, not a second cryptographic factor. What
+that does and does not mean, measured rather than assumed:
+
+- A process that is not `secretctl` **cannot** read the vault's wrap key.
+  The keychain item's ACL names one binary; anything else gets
+  `errSecAuthFailed`, or a dialog if it allows interaction.
+- What it can do is *ask* `secretctl`, and then it meets the same gates you
+  do. With the screen locked that means phone approval.
+- The gap: with the screen **unlocked and the key cache warm**
+  (`SECRETCTL_AGENT=1`), any local caller gets a secret with no prompt at
+  all. That is the cache working as designed, and it is the reason to keep
+  the TTL short if you share the machine with anything you do not trust.
+
+`docs/2fa-design.md` §1 carries the measurements; `docs/2of2-protector.md`
+specifies a real second factor and records why it is not being built.
 
 ## Status
 

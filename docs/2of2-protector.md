@@ -1,26 +1,74 @@
 # Two-of-two protector: making the second factor cryptographic
 
-Status: **design. No code written.** 2026-08-24.
-Implements `2fa-design.md` §4.2.
+Status: **specified, and deliberately NOT being built.** Decided 2026-08-24.
+Implements `2fa-design.md` §4.2. Kept as a complete design because the decision
+turns on a measurement of one setup, not on the design being wrong.
 
-**Not needed to make a locked screen work.** That shipped separately: a verified
-approval now stands in for the biometric gate it cannot satisfy
-(`2fa-push-approval.md` §2.2c). What this document adds is making the phone a
-*cryptographic* factor instead of a gate enforced by our own code — and per §4,
-that arrives only when the standalone protectors are **removed**, which is what
-costs one-touch unlock at the desk. Read §4 before deciding to build any of
-this; it is the part that determines whether the rest buys anything.
+## Why this is not being built
+
+**Its central premise was false, and measurement is what showed it.** §1 below
+argued that the keychain half of `mk` needs only "can run code as this uid". That
+was an inference from M3, which measured `secretctl` reading *its own* keychain
+item. Extending it to any process was never measured, and when it finally was —
+M5 in `2fa-design.md` §1.1 — it came out the other way: a binary the item's ACL
+does not name gets `errSecAuthFailed` with interaction suppressed, and blocks on
+a dialog without. Confirmed against a fresh test item and the real vault's item,
+and with `/usr/bin/security` as a second foreign caller.
+
+So the attack this document exists to stop is already stopped, by the legacy
+trusted-app ACL, and had been all along.
+
+**The gap that measurement did find, this does not close.** `2fa-design.md` §1.4:
+with the screen unlocked and the agent cache warm, `reveal` returns the plaintext
+with no Touch ID, no passphrase and no phone — and that is the everyday
+configuration, since the cache exists precisely to stop per-command prompts. A
+2of2 protector changes how `mk` is *derived*; the agent caches `mk` itself. §9 Q4
+below anticipated this and it turns out to be the whole story rather than a
+footnote.
+
+**What it would still buy**, stated so this is a real trade and not a dismissal:
+offline attack on a stolen or imaged Mac, where an attacker has the disk and the
+login keychain but not the phone; plus defence in depth if the ACL is ever
+bypassed or a user clicks through an "Always Allow" prompt for a hostile binary.
+Those are genuine. They are also not the threat model that motivated any of this,
+which was agents on a machine the operator is away from.
+
+**What it costs** is unchanged, and §4 is the reason: the migration must *remove*
+the standalone protectors or the disjunction makes the conjunction theatre — and
+removing them is what takes away one-touch Touch ID at the desk. Add recovery
+words whose loss is vault loss, and `S_mac` as a fresh single point of failure
+sitting next to a `prune-keychain` hazard that has already destroyed an item once
+in this project.
+
+**Revisit if**: the threat model shifts to a stolen disk, a machine turns up
+without the ACL barrier (a different keychain backend, a future macOS that drops
+legacy ACLs), or the agent cache gets scoped such that §1.4's row closes and this
+becomes the next-largest gap rather than an unrelated one.
+
+Everything below is the specification as written before that decision. §1's
+premise is the part now known to be wrong; the construction, format, migration
+and testability sections stand on their own.
+
+---
 
 ---
 
 ## 1. Why, in two sentences each
 
-**The security reason.** Protectors are a disjunction — `master_key.zig:186`
-walks the list and the first one that unwraps wins — so today
-`mk = passphrase OR keychain`, and M3 showed the keychain half needs only "can
-run code as this uid" because its wrap key reads out with interaction
-explicitly forbidden. An agent on this Mac already holds that, so the vault is
-one factor away from a program whose whole job is to run unattended.
+**The security reason — SUPERSEDED, this is the false premise.** Protectors are
+a disjunction — `master_key.zig:186` walks the list and the first one that
+unwraps wins — so today `mk = passphrase OR keychain`, and M3 showed the keychain
+half needs only "can run code as this uid" because its wrap key reads out with
+interaction explicitly forbidden. An agent on this Mac already holds that, so the
+vault is one factor away from a program whose whole job is to run unattended.
+
+> **The second sentence is wrong and M5 measured it wrong.** M3 established that
+> *`secretctl`* reads its own item with interaction forbidden. "Can run code as
+> this uid" was an extrapolation from that, and a foreign binary in fact gets
+> `errSecAuthFailed`. The disjunction is real; what the keychain disjunct
+> requires is not code execution but *the ACL-trusted binary, past its gates*.
+> Left in place rather than rewritten because this sentence is why the whole
+> document exists, and deleting it would hide that.
 
 **The operational reason, measured 2026-08-24.** With the screen locked, a
 Touch-ID-gated keychain protector cannot produce the master key even after a

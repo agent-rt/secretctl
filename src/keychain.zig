@@ -47,17 +47,22 @@ pub const Flags = enum(u8) {
 /// Whether `unwrap` may skip a `touch_id` body's biometric gate.
 ///
 /// The gate is enforced in this process, before `SecItemCopyMatching` — it is
-/// not an ACL on the keychain item (that would need a data-protection item and
-/// a Developer ID signature; see `docs/2fa-design.md` §1.1 M3). So it protects
-/// against a careless local prompt, not against code running as this uid, which
-/// can read the item directly without going anywhere near LocalAuthentication.
+/// not an ACL on the *biometric* requirement (that would need a data-protection
+/// item and a Developer ID signature; `docs/2fa-design.md` §1.1 M3). So for this
+/// binary the gate is skippable code rather than a barrier.
 ///
-/// That is what makes skipping it safe *when* out-of-band approval has already
-/// been obtained: the gate cannot be satisfied while the screen is locked
-/// (measured: it fails after 13 s, `2fa-push-approval.md` §2.2b), and removing
-/// an unsatisfiable gate widens nothing an attacker did not already have. It
-/// does not make approval a cryptographic factor — that needs the two-of-two
-/// protector *and* its migration (`docs/2of2-protector.md` §4).
+/// It is not the only thing in the way, and an earlier version of this comment
+/// said it was. The item does carry a legacy trusted-app ACL, and M5 measures
+/// that a foreign binary gets `errSecAuthFailed` — so a hostile local process
+/// cannot take the wrap key, only ask us for it and meet whatever gates we then
+/// apply.
+///
+/// That is what makes skipping this one safe *when* out-of-band approval has
+/// already been obtained: it cannot be satisfied while the screen is locked
+/// (measured: it fails after 13 s, `2fa-push-approval.md` §2.2b), and one gate
+/// has already been passed in its place. It does not make approval a
+/// cryptographic factor, and per `docs/2of2-protector.md` the design that would
+/// is deliberately not being built.
 pub const Gate = enum {
     /// Default. A `touch_id` body prompts for a fingerprint.
     require_biometric,

@@ -139,13 +139,15 @@ human consented cannot also satisfy a check that requires a finger on a sensor
 that is unavailable. Three configurations resolve it:
 
 1. **A keychain protector without the Touch ID gate.** Works today, as measured.
-   The cost is giving up the at-the-desk biometric prompt, and M3 already shows
-   that gate is an application-level `if` rather than a barrier — anything
-   running as this uid can read the wrap key regardless.
+   The cost is giving up the at-the-desk biometric prompt. M3 shows that gate is
+   an application-level `if` rather than a barrier *for this binary* — but not
+   for any other one, which M5 measures and which an earlier version of this
+   line got wrong.
 2. **The 2-of-2 protector of `2fa-design.md` §4.2**, specified in
    `2of2-protector.md`. The phone releases a key share as part of approving, so
    approval *produces* the key instead of authorising a step that then cannot be
-   satisfied.
+   satisfied. **Not being built** — M5 removed its premise; see that document's
+   opening section.
 3. **Keep the gate; let a verified approval stand in for it.** ← shipped, §2.2c.
 
 ### 2.2c Shipped: approval stands in for the gate
@@ -155,15 +157,18 @@ knows an approval verified. `.approved_out_of_band` skips the biometric prompt;
 every other caller keeps `.require_biometric`, so the at-the-desk prompt is
 untouched and the two contexts stop competing for the same protector.
 
-This is the right first step rather than a shortcut past option 2, and the
+This turned out to be not just the right first step but the whole of it, and the
 reason is worth stating because it is easy to get backwards. The gate is an
-in-process `if` before `SecItemCopyMatching`, not an ACL on the item (M3: a
-data-protection item with `kSecAccessControlBiometryAny` needs a Developer ID
-signature). Anything running as this uid reads the wrap key without going near
-LocalAuthentication. So:
+in-process `if` before `SecItemCopyMatching`, not an ACL on the biometric
+requirement (M3: a data-protection item with `kSecAccessControlBiometryAny` needs
+a Developer ID signature). So:
 
-- Removing an *unsatisfiable* gate widens nothing. The attacker with code
-  execution never had to satisfy it.
+- Removing an *unsatisfiable* gate widens nothing, because the item's own
+  trusted-app ACL is what actually keeps foreign callers out, and that is
+  untouched. M5 measures it: a binary the ACL does not name gets
+  `errSecAuthFailed`. An earlier revision of this paragraph asserted the
+  opposite — "anything running as this uid reads the wrap key" — which was an
+  over-read of M3 and is corrected in `2fa-design.md` §1.1.
 - **Option 2 buys nothing on its own either.** A 2of2 protector added alongside
   the existing ones leaves the vault a disjunction — `master_key.zig:157` takes
   the first protector that unwraps — so the phone stays bypassable until the
@@ -186,11 +191,15 @@ started from — an agent asking for a secret with nobody at the machine — and
 one where it matters most, since an MCP server has no interactive channel at all
 and approval from another device is its only path.
 
-Every earlier note in these documents calling §4.2 "stronger but optional" is
-wrong on this point, and is corrected: it is not optional *if the goal is making
-the phone a factor*. It was never the prerequisite for making a locked screen
-unlockable — that is this section. Both corrections came out of running the
-thing, not from reading it.
+Every earlier note in these documents calling §4.2 "stronger but optional" was
+wrong about *why*, though it landed nearer the truth than what replaced it. §4.2
+was never the prerequisite for making a locked screen unlockable — that is this
+section. And it is now not being built at all, because M5 showed the threat it
+targeted was already closed by the keychain item's ACL; `2of2-protector.md`
+opens with that reasoning.
+
+Three corrections to this document, none of which came from re-reading it: the
+13 s measurement, this section, and M5. Each arrived from running something.
 
 ### 2.3 Every test suite must pin the lock state
 
