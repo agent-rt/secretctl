@@ -42,7 +42,8 @@ If a release contains both, it is `0.X.0`.
 
 ## Doing a release
 
-1. Merge the feature PRs. None of them touched a version.
+1. Merge the feature PRs. None of them touched a version. If they form a
+   stack, merge it atomically — see below.
 2. Branch `release/vX.Y.Z`.
 3. Bump the three strings. That commit is the only thing on the branch.
 4. PR, wait for CI, merge.
@@ -58,6 +59,32 @@ If a release contains both, it is `0.X.0`.
 Then verify what was actually published rather than trusting the green tick:
 download the tarball, check its SHA-256 against the formula, extract it and run
 `--version`. A workflow can succeed and still ship the wrong bytes.
+
+## Merging a stack
+
+Several dependent PRs are a stack, and `gh pr merge` cannot merge one: merging
+them one at a time re-targets the others and churns their CI.
+
+```bash
+gh stack merge <stack#> --yes --rebase   # all of them, or none
+gh stack sync --prune                    # delete the merged local branches
+```
+
+`gh stack` is git-branch-centric and this repo is driven with jj, which keeps
+HEAD detached and presents the working copy's contents as uncommitted changes.
+Every `gh stack` command fails on both counts until you do this first:
+
+```bash
+jj new <branch>          # @ becomes empty, so git's worktree matches HEAD
+git checkout <branch>    # attach HEAD
+```
+
+Afterwards `jj git fetch` re-imports and the stack is intact.
+
+One trap worth knowing: if `gh stack init` fails partway through its checkout,
+**the stack has already been registered**. Rerunning then reports
+`branch "X" already exists in a stack`, which reads like nothing was created.
+Attach HEAD and run `gh stack view --json` — that is the only reliable view.
 
 ## Getting confirmation first
 

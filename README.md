@@ -51,6 +51,13 @@ The number survives for shells: `2` for a wrong request, `1` for a refusal.
   terminal requirement. Treat it as scoping for the intended path, not as
   containment; if you need the stronger property, the agent needs a
   narrower shell, not a stricter config file.
+
+  Install the skill where your agent will read it, e.g.
+  `secretctl skill > ~/.claude/skills/secretctl/SKILL.md`. It says which
+  command to reach for, how to get past a locked screen, and what each
+  failure name means — including that `totp-seed-unreadable` must **not**
+  be answered with `2fa enroll`, which would replace the seed and break
+  the human's authenticator.
 - **Encrypted metadata**: secret names, tags, and timestamps are
   inside the AEAD body. `strings(1)` on the vault file shows nothing
   useful — stronger than SOPS' field-level encryption.
@@ -262,8 +269,12 @@ v0.10.0. macOS arm64 only. Shipped: vault + CLI, Touch ID–gated unlock,
 `materialize` + Home Manager module, cross-Mac vault sync over git,
 offline TOTP approval when the screen is locked, `secretctl skill` for
 agents, and named failure codes on stderr. See `tests/e2e.sh`,
-`tests/e2e_sync.sh`, and `tests/e2e_lockstate.sh` for the behavior
-contract.
+`tests/e2e_sync.sh`, `tests/e2e_lockstate.sh` and `tests/e2e_skill.sh`
+for the behavior contract — the last of those checks every factual claim
+in the skill against the binary, so a stale claim fails CI rather than
+misinforming an agent.
+
+`docs/RELEASING.md` carries the versioning rule and the release steps.
 
 **The MCP server was removed in v0.7.0.** If you were running
 `secretctl mcp`, point the agent at the CLI instead: `secretctl exec`
