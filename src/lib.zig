@@ -19,6 +19,7 @@ pub const edit_view = @import("edit_view.zig");
 pub const list_view = @import("list_view.zig");
 pub const policy = @import("policy.zig");
 pub const totp = @import("totp.zig");
+pub const qr = @import("qr.zig");
 pub const audit = @import("audit.zig");
 pub const paths = @import("paths.zig");
 pub const cli = @import("cli.zig");
@@ -32,7 +33,7 @@ pub const agent = @import("agent.zig");
 test {
     const std = @import("std");
     std.testing.refAllDecls(@This());
-    inline for (.{ mem, rand, clock, aes, argon2, protector, keychain, master_key, envelope, codec, fsx, vault, tty, edit_view, list_view, policy, audit, paths, cli, editor, jsonx, totp, local_auth, lockstate, authz, agent }) |m| {
+    inline for (.{ mem, rand, clock, aes, argon2, protector, keychain, master_key, envelope, codec, fsx, vault, tty, edit_view, list_view, policy, audit, paths, cli, editor, jsonx, totp, qr, local_auth, lockstate, authz, agent }) |m| {
         std.testing.refAllDecls(m);
     }
 }

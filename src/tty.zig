@@ -6,6 +6,8 @@
 //! All routines are macOS-specific (termios layout, isatty(3)).
 
 const std = @import("std");
+
+extern "c" fn ioctl(fd: c_int, request: c_ulong, ...) c_int;
 const mem_util = @import("mem.zig");
 
 const STDIN: c_int = 0;
@@ -44,6 +46,20 @@ const TCSAFLUSH: c_int = 2;
 
 extern "c" fn tcgetattr(fd: c_int, t: *termios) c_int;
 extern "c" fn tcsetattr(fd: c_int, optional_actions: c_int, t: *const termios) c_int;
+
+const winsize = extern struct { ws_row: u16, ws_col: u16, ws_xpixel: u16, ws_ypixel: u16 };
+const TIOCGWINSZ: c_ulong = 0x40087468; // Darwin
+
+/// Terminal width in columns, or 0 when stdout is not a terminal.
+///
+/// 0 rather than a guessed default: callers use it to decide whether output
+/// fits, and inventing a width for a pipe would make them refuse things that
+/// were never going to wrap.
+pub fn terminalCols() usize {
+    var ws: winsize = undefined;
+    if (ioctl(STDOUT, TIOCGWINSZ, &ws) != 0) return 0;
+    return ws.ws_col;
+}
 
 pub fn isStdinTty() bool {
     return isatty(STDIN) != 0;
