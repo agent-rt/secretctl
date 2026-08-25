@@ -46,7 +46,7 @@ fi
 
 # "it gates exec only, not reveal" — both halves.
 out=$( (cd "$WORK/p" && sc exec --tag other -- env 2>&1) || true)
-grep -q "not in .secretctl.toml allowlist" <<<"$out" \
+grep -q "not-allowed-tag" <<<"$out" \
   && ok "claim: the allowlist gates exec" \
   || bad "claim false: exec ignored the allowlist" "${out:0:100}"
 
@@ -75,6 +75,15 @@ while read -r cmd; do
     && bad "skill names a command that does not exist: $cmd" \
     || ok "command exists: $cmd"
 done < <(grep -o '^secretctl [a-z0-9-]*' <<<"$SKILL" | awk '{print $2}' | sort -u)
+
+# The skill tells an agent to branch on the name, not the number. So every
+# failure must actually print one, in the promised shape.
+for probe in "nosuchcmd" "reveal" "reveal NOPE"; do
+  set +e; out=$(sc $probe 2>&1 >/dev/null | head -1); set -e
+  [[ "$out" == secretctl:\ * ]] \
+    && ok "named failure for '$probe': ${out#secretctl: }" \
+    || bad "'$probe' failed without a named code" "${out:0:80}"
+done
 
 [[ $FAILED -eq 0 ]] || { echo; echo "SKILL E2E FAILED"; exit 1; }
 echo; echo "ALL SKILL E2E TESTS PASSED"

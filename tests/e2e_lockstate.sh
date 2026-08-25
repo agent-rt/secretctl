@@ -161,7 +161,7 @@ set +e
 out=$(SECRETCTL_FORCE_LOCKED=1 SECRETCTL_TOTP_FD=3 SECRETCTL_PASSPHRASE_FD=4 \
       "$BIN" list --json 3<<<"$CODE" 4<<<"$PASS" 2>&1); rc=$?
 set -e
-if [[ $rc -ne 0 ]] && grep -qi "already used" <<<"$out"; then
+if [[ $rc -ne 0 ]] && grep -q "code-already-used" <<<"$out"; then
   ok "locked: the same code is refused as replay, with a distinct message"
 else
   bad "locked: a spent code was accepted again" "rc=$rc ${out:0:160}"
@@ -238,7 +238,7 @@ sc 2fa revoke >/dev/null 2>&1
 # The code that opened a window is spent like any other — a window must not be
 # a way to reuse one.
 out=$(SECRETCTL_FORCE_LOCKED=1 "$BIN" 2fa auth "$(totp_code)" 2>&1 || true)
-grep -qi "already used" <<<"$out" \
+grep -q "code-already-used" <<<"$out" \
   && ok "window: the opening code is still single-use" \
   || bad "window: a spent code opened a second window" "${out:0:120}"
 sc 2fa revoke >/dev/null 2>&1

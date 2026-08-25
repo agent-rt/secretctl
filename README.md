@@ -31,6 +31,12 @@ secretctl skill                               # SKILL.md for an agent
 `secretctl --help` lists every command and flag; the binary's help is the
 authoritative reference.
 
+Every failure prints a named code on stderr — `secretctl: secret-not-found:
+NOPE`, `secretctl: locked-needs-code: …` — so callers branch on the name
+rather than on an exit status that lumps a typo in with a missing secret.
+The number survives for shells: `2` for a wrong request, `1` for a refusal.
+`secretctl skill` lists the names and what to do about each.
+
 ## Why
 
 - **Agent-first**: an agent runs

@@ -43,8 +43,8 @@ pub const ExitCode = enum(u8) {
 /// configured passphrase channel. See tty.passphraseFd for why the passphrase
 /// is never taken from fd 0 in batch mode.
 const passphrase_channel_hint =
-    "no terminal for the master password; pass it on a dedicated fd, e.g.\n" ++
-    "  SECRETCTL_PASSPHRASE_FD=3 secretctl ... 3<<<\"$PASSPHRASE\"\n";
+    "secretctl: no-passphrase-channel: no terminal for the master password\n" ++
+    "  pass it on a dedicated fd: SECRETCTL_PASSPHRASE_FD=3 secretctl ... 3<<<\"$PASSPHRASE\"\n";
 
 pub const usage_text =
     \\secretctl — single-binary local secret manager
@@ -121,9 +121,8 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) u8 {
     if (std.mem.eql(u8, cmd, "2fa")) return runTwoFactor(allocator, tail);
     if (std.mem.eql(u8, cmd, "skill")) return runSkill(tail);
 
-    tty.writeStderr("unknown command: ");
-    tty.writeStderr(cmd);
-    tty.writeStderr("\n\n");
+    _ = fail(.usage, cmd);
+    tty.writeStderr("\n");
     tty.writeStderr(usage_text);
     return @intFromEnum(ExitCode.usage);
 }
@@ -307,7 +306,7 @@ fn unlockSession(
     defer if (!ok) p.deinit();
 
     if (!fsx.fileExists(p.master_key)) {
-        tty.writeStderr("no vault found; run `secretctl init` first\n");
+        _ = fail(.no_vault, "run `secretctl init` first");
         return null;
     }
 
@@ -335,18 +334,14 @@ fn unlockSession(
         switch (totpState(&totp_mk_id)) {
             .enrolled => {},
             .not_enrolled => {
-                // Fail closed, and say which of the two things is missing:
+                // Fail closed, and name which of the two things is missing:
                 // nobody is at the machine, and there is no way to ask them.
-                tty.writeStderr("cannot authorize: ");
-                tty.writeStderr(authz_decision.reason);
-                tty.writeStderr("\n");
+                _ = fail(.locked_not_enrolled, authz_decision.reason);
                 tty.writeStderr(authz.not_configured_hint);
                 return null;
             },
             .unreadable => {
-                tty.writeStderr("cannot authorize: ");
-                tty.writeStderr(authz_decision.reason);
-                tty.writeStderr("\n");
+                _ = fail(.totp_seed_unreadable, authz_decision.reason);
                 tty.writeStderr(totp_unreadable_hint);
                 return null;
             },
@@ -427,7 +422,7 @@ fn unlockSession(
             defer pw.deinit();
             const result = master_key_mod.parseAndUnlock(allocator, blob, pw.bytes, .require_biometric, &master_key, null) catch |e| switch (e) {
                 master_key_mod.Error.AuthenticationFailed => {
-                    tty.writeStderr("incorrect password\n");
+                    _ = fail(.wrong_password, "");
                     continue;
                 },
                 else => {
@@ -572,8 +567,7 @@ fn runAgent(allocator: std.mem.Allocator, args: []const []const u8) u8 {
         return 0;
     }
 
-    tty.writeStderr("usage: secretctl agent [run|status|stop]\n");
-    return 2;
+    return usageFail("agent", "usage: secretctl agent [run|status|stop]\n");
 }
 
 // ------- add / rm -------
@@ -596,8 +590,7 @@ fn readAllStdin(allocator: std.mem.Allocator) ![]u8 {
 
 fn runAdd(allocator: std.mem.Allocator, args: []const []const u8) u8 {
     if (args.len == 0) {
-        tty.writeStderr("usage: secretctl add NAME [--tag X,Y]\n");
-        return 2;
+        return usageFail("add", "usage: secretctl add NAME [--tag X,Y]\n");
     }
     const name = args[0];
     if (!isValidName(name)) {
@@ -678,10 +671,7 @@ fn runAdd(allocator: std.mem.Allocator, args: []const []const u8) u8 {
     defer sess.deinit();
 
     if (sess.body.findIndex(name) != null) {
-        tty.writeStderr("secret already exists: ");
-        tty.writeStderr(name);
-        tty.writeStderr("\n");
-        return 2;
+        return fail(.duplicate_name, name);
     }
 
     var pt: mem_util.Plaintext = undefined;
@@ -774,20 +764,14 @@ fn runAdd(allocator: std.mem.Allocator, args: []const []const u8) u8 {
 
 fn runEdit(allocator: std.mem.Allocator, args: []const []const u8) u8 {
     if (args.len != 1) {
-        tty.writeStderr("usage: secretctl edit NAME\n");
-        return 2;
+        return usageFail("edit", "usage: secretctl edit NAME\n");
     }
     const name = args[0];
 
     var sess = unlockSession(allocator, .allow) orelse return 1;
     defer sess.deinit();
 
-    const idx = sess.body.findIndex(name) orelse {
-        tty.writeStderr("secret not found: ");
-        tty.writeStderr(name);
-        tty.writeStderr("\n");
-        return 2;
-    };
+    const idx = sess.body.findIndex(name) orelse return fail(.secret_not_found, name);
     const original_rec = sess.body.secrets.items[idx];
 
     var current = envelope_mod.decrypt(allocator, &sess.master_key, &sess.master_key_id, &original_rec.id, &original_rec.envelope) catch return errExit("decrypt failed");
@@ -842,18 +826,14 @@ fn runEdit(allocator: std.mem.Allocator, args: []const []const u8) u8 {
 
 fn runRm(allocator: std.mem.Allocator, args: []const []const u8) u8 {
     if (args.len != 1) {
-        tty.writeStderr("usage: secretctl rm NAME\n");
-        return 2;
+        return usageFail("rm", "usage: secretctl rm NAME\n");
     }
     const name = args[0];
     var sess = unlockSession(allocator, .allow) orelse return 1;
     defer sess.deinit();
     sess.body.removeByName(allocator, name) catch |e| switch (e) {
         vault_mod.Error.NotFound => {
-            tty.writeStderr("secret not found: ");
-            tty.writeStderr(name);
-            tty.writeStderr("\n");
-            return 2;
+            return fail(.secret_not_found, name);
         },
         else => return errExit("rm failed"),
     };
@@ -1001,8 +981,7 @@ fn runExec(allocator: std.mem.Allocator, args: []const []const u8) u8 {
     }
 
     if (dash_dash == null or dash_dash.? + 1 >= args.len) {
-        tty.writeStderr("usage: secretctl exec [--tag X] [--only N1,N2] -- COMMAND ARGS...\n");
-        return 2;
+        return usageFail("exec", "usage: secretctl exec [--tag X] [--only N1,N2] -- COMMAND ARGS...\n");
     }
     const child_argv = args[dash_dash.? + 1 ..];
     if (tag_filter.items.len == 0 and only_filter.items.len == 0) {
@@ -1017,16 +996,10 @@ fn runExec(allocator: std.mem.Allocator, args: []const []const u8) u8 {
     defer if (pol.present) pol.deinit();
 
     if (!pol.allowsCommand(child_argv[0])) {
-        tty.writeStderr("command not in .secretctl.toml allowlist: ");
-        tty.writeStderr(child_argv[0]);
-        tty.writeStderr("\n");
-        return 2;
+        return fail(.not_allowed_command, child_argv[0]);
     }
     for (tag_filter.items) |t| if (!pol.allowsTag(t)) {
-        tty.writeStderr("tag not in .secretctl.toml allowlist: ");
-        tty.writeStderr(t);
-        tty.writeStderr("\n");
-        return 2;
+        return fail(.not_allowed_tag, t);
     };
 
     var sess = unlockSession(allocator, .allow) orelse return 1;
@@ -1208,8 +1181,7 @@ fn runExec(allocator: std.mem.Allocator, args: []const []const u8) u8 {
 
 fn runRender(allocator: std.mem.Allocator, args: []const []const u8) u8 {
     if (args.len < 3 or !std.mem.eql(u8, args[1], "--out")) {
-        tty.writeStderr("usage: secretctl render TEMPLATE --out PATH\n");
-        return 2;
+        return usageFail("render", "usage: secretctl render TEMPLATE --out PATH\n");
     }
     const template_path = args[0];
     const out_path = args[2];
@@ -1279,8 +1251,7 @@ fn runRender(allocator: std.mem.Allocator, args: []const []const u8) u8 {
 
 fn runTag(allocator: std.mem.Allocator, args: []const []const u8) u8 {
     if (args.len != 2) {
-        tty.writeStderr("usage: secretctl tag NAME X,Y[,Z]\n");
-        return 2;
+        return usageFail("tag", "usage: secretctl tag NAME X,Y[,Z]\n");
     }
     const name = args[0];
     const tags_arg = args[1];
@@ -1299,10 +1270,7 @@ fn runTag(allocator: std.mem.Allocator, args: []const []const u8) u8 {
 
     sess.body.setTags(allocator, name, tags.items) catch |e| switch (e) {
         vault_mod.Error.NotFound => {
-            tty.writeStderr("secret not found: ");
-            tty.writeStderr(name);
-            tty.writeStderr("\n");
-            return 2;
+            return fail(.secret_not_found, name);
         },
         else => return errExit("setTags failed"),
     };
@@ -1369,8 +1337,7 @@ fn runMaterialize(allocator: std.mem.Allocator, args: []const []const u8) u8 {
     }
 
     if (name == null or out_path == null) {
-        tty.writeStderr("usage: secretctl materialize NAME --out PATH [--mode MODE] [--mkdir]\n");
-        return 2;
+        return usageFail("materialize", "usage: secretctl materialize NAME --out PATH [--mode MODE] [--mkdir]\n");
     }
 
     if (mkdir) {
@@ -1384,10 +1351,7 @@ fn runMaterialize(allocator: std.mem.Allocator, args: []const []const u8) u8 {
 
     var pt = sess.body.revealSecret(allocator, &sess.master_key, &sess.master_key_id, name.?) catch |e| switch (e) {
         vault_mod.Error.NotFound => {
-            tty.writeStderr("secret not found: ");
-            tty.writeStderr(name.?);
-            tty.writeStderr("\n");
-            return 2;
+            return fail(.secret_not_found, name.?);
         },
         else => return errExit("decrypt failed"),
     };
@@ -1419,8 +1383,7 @@ fn runMaterialize(allocator: std.mem.Allocator, args: []const []const u8) u8 {
 
 fn runReveal(allocator: std.mem.Allocator, args: []const []const u8) u8 {
     if (args.len != 1) {
-        tty.writeStderr("usage: secretctl reveal NAME\n");
-        return 2;
+        return usageFail("reveal", "usage: secretctl reveal NAME\n");
     }
     if (!tty.isStdoutTty() and c_getenv("SECRETCTL_BATCH") == null) {
         tty.writeStderr("reveal must be run on an interactive terminal (no stdout capture)\n");
@@ -1437,10 +1400,7 @@ fn runReveal(allocator: std.mem.Allocator, args: []const []const u8) u8 {
 
     var pt = sess.body.revealSecret(allocator, &sess.master_key, &sess.master_key_id, name) catch |e| switch (e) {
         vault_mod.Error.NotFound => {
-            tty.writeStderr("secret not found: ");
-            tty.writeStderr(name);
-            tty.writeStderr("\n");
-            return 2;
+            return fail(.secret_not_found, name);
         },
         else => return errExit("reveal failed"),
     };
@@ -1515,8 +1475,8 @@ const skill_text =
     \\6-digit TOTP code instead. You will see:
     \\
     \\```
-    \\authorization required: screen is locked, so Touch ID cannot be satisfied
-    \\no code supplied. Pass it on a dedicated fd, ...
+    \\secretctl: locked-needs-code: screen is locked, so Touch ID cannot be satisfied
+    \\  supply one: SECRETCTL_TOTP_FD=3 secretctl ... 3<<<"123456"
     \\```
     \\
     \\Ask the human for the current code from their authenticator, then:
@@ -1551,13 +1511,37 @@ const skill_text =
     \\
     \\## Exit codes
     \\
-    \\`0` ok · `2` the request was wrong — unknown command, bad arguments, or
-    \\a secret name that does not exist · `1` it failed or refused: no vault,
-    \\wrong password, stopped at the authorization gate. The message on stderr
-    \\says which.
+    \\Do not branch on the number. Every failure prints a **named** code on
+    \\stderr, first field, always in this shape:
     \\
-    \\So `2` means fix the request; `1` means something outside the request
-    \\needs to change, usually by asking the human.
+    \\```
+    \\secretctl: <name>: <detail>
+    \\```
+    \\
+    \\Fix the request:
+    \\
+    \\- `usage` — unknown command or bad arguments
+    \\- `secret-not-found` — that name is not in the vault; `list --json` first
+    \\- `duplicate-name` — it already exists; use `edit`
+    \\- `not-allowed-command` / `not-allowed-tag` — `.secretctl.toml` says no.
+    \\  Ask the human to widen it; do not read the secret another way.
+    \\- `needs-terminal` — that command wants a human at a keyboard
+    \\
+    \\Ask a human, or wait:
+    \\
+    \\- `locked-needs-code` — supply a 6-digit code, or `2fa auth`
+    \\- `code-already-used` — codes are single use; wait up to 30s for the next
+    \\- `bad-code` — wrong or malformed; ask for it again, once
+    \\- `locked-not-enrolled` — no authenticator is paired. Only the human can
+    \\- `totp-seed-unreadable` — **do not run `2fa enroll`**, it would replace
+    \\  the seed and break their phone
+    \\- `no-vault` — `secretctl init` has not been run
+    \\- `wrong-password` / `no-passphrase-channel` — not yours to solve
+    \\- `sync-diverged` — the git history needs a human
+    \\- `internal-error` — something broke; report the message verbatim
+    \\
+    \\The numeric code is a coarse summary of the same thing: `2` for the first
+    \\group, `1` for the second, `0` for success.
     \\
     \\Machine-readable output goes to stdout and progress to stderr, so
     \\`--json` stays parseable while a command is asking for authorization.
@@ -1566,8 +1550,7 @@ const skill_text =
 
 fn runSkill(args: []const []const u8) u8 {
     if (args.len != 0) {
-        tty.writeStderr("usage: secretctl skill\n");
-        return 2;
+        return usageFail("skill", "usage: secretctl skill\n");
     }
     tty.writeStdout(skill_text);
     return 0;
@@ -1717,16 +1700,16 @@ fn requestTotpApproval(
         allocator.free(seed);
     }
 
-    tty.writeStderr("authorization required: ");
-    tty.writeStderr(reason);
-    tty.writeStderr("\n");
+    // Named before the prompt, so something reading only stderr can tell
+    // "you must supply a code" from "your code was wrong".
+    _ = fail(.locked_needs_code, reason);
 
     var code = tty.readFromFdEnv(allocator, "SECRETCTL_TOTP_FD") catch blk: {
         // No dedicated channel. A terminal is the other legitimate source; an
         // unattended run has neither and must fail rather than hang.
         const pw = tty.readPassword(allocator, "6-digit code: ") catch {
-            tty.writeStderr("no code supplied. Pass it on a dedicated fd, e.g.\n" ++
-                "  SECRETCTL_TOTP_FD=3 secretctl ... 3<<<\"123456\"\n");
+            tty.writeStderr("  supply one: SECRETCTL_TOTP_FD=3 secretctl ... 3<<<\"123456\"\n" ++
+                "  or open a window: secretctl 2fa auth 123456\n");
             return false;
         };
         break :blk pw;
@@ -1737,10 +1720,9 @@ fn requestTotpApproval(
     const last = totpLastStep(allocator, home);
     const m = totp.verifyNow(seed, trimmed, last) catch |e| {
         switch (e) {
-            totp.Error.Replayed => tty.writeStderr(
-                "that code was already used. Wait for the next one (up to 30s).\n"),
-            totp.Error.Malformed => tty.writeStderr("expected exactly six digits\n"),
-            else => tty.writeStderr("incorrect code\n"),
+            totp.Error.Replayed => _ = fail(.code_already_used, "wait for the next one, up to 30s"),
+            totp.Error.Malformed => _ = fail(.bad_code, "expected exactly six digits"),
+            else => _ = fail(.bad_code, ""),
         }
         audit_mod.log("authz.denied", .cli, &.{audit_mod.s("method", "totp")});
         return false;
@@ -1760,14 +1742,12 @@ fn requestTotpApproval(
 
 fn runTwoFactor(allocator: std.mem.Allocator, args: []const []const u8) u8 {
     if (args.len == 0) {
-        tty.writeStderr("usage: secretctl 2fa [enroll|auth|revoke|status|test|disable]\n");
-        return 2;
+        return usageFail("2fa", "usage: secretctl 2fa [enroll|auth|revoke|status|test|disable]\n");
     }
     var p = paths_mod.resolve(allocator) catch return errExit("cannot resolve paths");
     defer p.deinit();
     if (!fsx.fileExists(p.master_key)) {
-        tty.writeStderr("no vault found; run `secretctl init` first\n");
-        return 1;
+        return fail(.no_vault, "run `secretctl init` first");
     }
     const blob = fsx.readAllAlloc(allocator, p.master_key, 1 * 1024 * 1024) catch
         return errExit("read master.key failed");
@@ -1910,9 +1890,9 @@ fn runTwoFactor(allocator: std.mem.Allocator, args: []const []const u8) u8 {
             const trimmed = std.mem.trim(u8, code, " \t\r\n");
             const m = totp.verifyNow(seed, trimmed, totpLastStep(allocator, p.home)) catch |e| {
                 switch (e) {
-                    totp.Error.Replayed => tty.writeStderr("that code was already used. Wait for the next one (up to 30s).\n"),
-                    totp.Error.Malformed => tty.writeStderr("expected exactly six digits\n"),
-                    else => tty.writeStderr("incorrect code\n"),
+                    totp.Error.Replayed => _ = fail(.code_already_used, "wait for the next one, up to 30s"),
+                    totp.Error.Malformed => _ = fail(.bad_code, "expected exactly six digits"),
+                    else => _ = fail(.bad_code, ""),
                 }
                 audit_mod.log("authz.denied", .cli, &.{audit_mod.s("method", "totp")});
                 break :blk false;
@@ -1963,8 +1943,7 @@ fn runTwoFactor(allocator: std.mem.Allocator, args: []const []const u8) u8 {
 
 fn runKey(allocator: std.mem.Allocator, args: []const []const u8) u8 {
     if (args.len == 0) {
-        tty.writeStderr("usage: secretctl key add-keychain-protector [--touch-id|--no-touch-id]\n");
-        return 2;
+        return usageFail("key", "usage: secretctl key add-keychain-protector [--touch-id|--no-touch-id]\n");
     }
     const sub = args[0];
     const tail = args[1..];
@@ -2005,8 +1984,7 @@ fn runKeyAddKeychainProtector(allocator: std.mem.Allocator, args: []const []cons
     var p = paths_mod.resolve(allocator) catch return errExit("cannot resolve paths");
     defer p.deinit();
     if (!fsx.fileExists(p.master_key)) {
-        tty.writeStderr("no vault found; run `secretctl init` first\n");
-        return 1;
+        return fail(.no_vault, "run `secretctl init` first");
     }
 
     const blob = fsx.readAllAlloc(allocator, p.master_key, 1 * 1024 * 1024) catch return errExit("read master.key failed");
@@ -2146,8 +2124,7 @@ extern "c" fn pipe(fds: *[2]c_int) c_int;
 
 fn runSync(allocator: std.mem.Allocator, args: []const []const u8) u8 {
     if (args.len != 0) {
-        tty.writeStderr("usage: secretctl sync\n");
-        return 2;
+        return usageFail("sync", "usage: secretctl sync\n");
     }
     var p = paths_mod.resolve(allocator) catch return errExit("cannot resolve paths");
     defer p.deinit();
@@ -2226,8 +2203,7 @@ fn runReinstallKeychain(allocator: std.mem.Allocator, args: []const []const u8) 
         } else if (std.mem.eql(u8, a, "--no-touch-id")) {
             touch_id_flag = false;
         } else {
-            tty.writeStderr("usage: secretctl reinstall-keychain [--touch-id|--no-touch-id]\n");
-            return 2;
+            return usageFail("reinstall-keychain", "usage: secretctl reinstall-keychain [--touch-id|--no-touch-id]\n");
         }
     }
     const batch = c_getenv("SECRETCTL_BATCH") != null;
@@ -2245,8 +2221,7 @@ fn runReinstallKeychain(allocator: std.mem.Allocator, args: []const []const u8) 
     var p = paths_mod.resolve(allocator) catch return errExit("cannot resolve paths");
     defer p.deinit();
     if (!fsx.fileExists(p.master_key)) {
-        tty.writeStderr("no vault found; run `secretctl init` first\n");
-        return 1;
+        return fail(.no_vault, "run `secretctl init` first");
     }
 
     // Read master.key blob.
@@ -2264,8 +2239,7 @@ fn runReinstallKeychain(allocator: std.mem.Allocator, args: []const []const u8) 
     var master_key: [aes.key_len]u8 = undefined;
     var parsed = master_key_mod.parseAndUnlock(allocator, blob, pw.bytes, .require_biometric, &master_key, null) catch |e| switch (e) {
         master_key_mod.Error.AuthenticationFailed => {
-            tty.writeStderr("incorrect password\n");
-            return 1;
+            return fail(.wrong_password, "");
         },
         else => return errExit("vault unlock failed"),
     };
@@ -2333,16 +2307,14 @@ fn runPruneKeychain(allocator: std.mem.Allocator, args: []const []const u8) u8 {
         if (std.mem.eql(u8, a, "--yes")) {
             yes = true;
         } else {
-            tty.writeStderr("usage: secretctl prune-keychain [--yes]\n");
-            return 2;
+            return usageFail("prune-keychain", "usage: secretctl prune-keychain [--yes]\n");
         }
     }
 
     var p = paths_mod.resolve(allocator) catch return errExit("cannot resolve paths");
     defer p.deinit();
     if (!fsx.fileExists(p.master_key)) {
-        tty.writeStderr("no vault found; run `secretctl init` first\n");
-        return 1;
+        return fail(.no_vault, "run `secretctl init` first");
     }
     const blob = fsx.readAllAlloc(allocator, p.master_key, 1 * 1024 * 1024) catch return errExit("read master.key failed");
     defer allocator.free(blob);
@@ -2413,11 +2385,98 @@ fn isValidName(name: []const u8) bool {
     return true;
 }
 
-fn errExit(msg: []const u8) u8 {
+/// A named failure, for the benefit of whatever is reading stderr.
+///
+/// The numeric exit code stays what it was — shells and scripts depend on it —
+/// but a number is a poor thing to branch on: `2` covers a typo'd command and a
+/// secret that does not exist, which call for completely different responses.
+/// The name is the part meant to be matched.
+///
+/// Printed as `secretctl: <name>: <detail>`, one line, always on stderr, so it
+/// never contaminates `--json` on stdout.
+pub const Fail = enum {
+    // Wrong request — fix the request. (exit 2)
+    usage,
+    secret_not_found,
+    duplicate_name,
+    not_allowed_command,
+    not_allowed_tag,
+    needs_terminal,
+
+    // Refused or failed — something outside the request must change. (exit 1)
+    no_vault,
+    wrong_password,
+    no_passphrase_channel,
+    locked_needs_code,
+    locked_not_enrolled,
+    totp_seed_unreadable,
+    bad_code,
+    code_already_used,
+    sync_diverged,
+    internal_error,
+
+    fn name(self: Fail) []const u8 {
+        return switch (self) {
+            .usage => "usage",
+            .secret_not_found => "secret-not-found",
+            .duplicate_name => "duplicate-name",
+            .not_allowed_command => "not-allowed-command",
+            .not_allowed_tag => "not-allowed-tag",
+            .needs_terminal => "needs-terminal",
+            .no_vault => "no-vault",
+            .wrong_password => "wrong-password",
+            .no_passphrase_channel => "no-passphrase-channel",
+            .locked_needs_code => "locked-needs-code",
+            .locked_not_enrolled => "locked-not-enrolled",
+            .totp_seed_unreadable => "totp-seed-unreadable",
+            .bad_code => "bad-code",
+            .code_already_used => "code-already-used",
+            .sync_diverged => "sync-diverged",
+            .internal_error => "internal-error",
+        };
+    }
+
+    /// 2 = the request was wrong, 1 = it failed or refused. Kept because
+    /// shells cannot read names, and because the split is genuinely useful:
+    /// one means retry differently, the other means ask a human.
+    fn code(self: Fail) u8 {
+        return switch (self) {
+            .usage,
+            .secret_not_found,
+            .duplicate_name,
+            .not_allowed_command,
+            .not_allowed_tag,
+            .needs_terminal,
+            => 2,
+            else => 1,
+        };
+    }
+};
+
+/// A usage error, named like every other failure so one grep finds them all.
+/// The human-readable usage line follows on its own line.
+fn usageFail(what: []const u8, usage_line: []const u8) u8 {
+    _ = fail(.usage, what);
+    tty.writeStderr(usage_line);
+    return @intFromEnum(ExitCode.usage);
+}
+
+/// Print a named failure and return its exit code.
+fn fail(f: Fail, detail: []const u8) u8 {
     tty.writeStderr("secretctl: ");
-    tty.writeStderr(msg);
+    tty.writeStderr(f.name());
+    if (detail.len > 0) {
+        tty.writeStderr(": ");
+        tty.writeStderr(detail);
+    }
     tty.writeStderr("\n");
-    return 1;
+    return f.code();
+}
+
+/// Kept as the catch-all for conditions with no better name: something broke
+/// that the caller cannot act on specifically.
+fn errExit(msg: []const u8) u8 {
+    return fail(.internal_error, msg);
 }
 
 const testing = std.testing;
