@@ -143,6 +143,11 @@ The intended flow is that an agent asks, you read six digits off your
 phone, and you hand them over on the fd. Without an enrolment a locked
 screen simply refuses, and says so.
 
+*Google Authenticator quirk:* after scanning it may show no confirmation,
+which looks like the scan failed. Close and reopen the app before trying
+again — the entry is usually there, and rescanning just adds duplicates
+that generate identical codes.
+
 Each code is **single use**: `secretctl` records the time step it spent and
 refuses that code again, with a message that distinguishes "wrong code"
 from "that one is gone, wait 30s". This matters because the code travels

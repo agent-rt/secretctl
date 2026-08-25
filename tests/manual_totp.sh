@@ -73,6 +73,12 @@ Add that URI to the authenticator you actually intend to use.
   * The entry will appear as "secretctl (vault)". It is DISPOSABLE —
     delete it from the app when you finish; cleanup cannot.
 
+  Google Authenticator quirk, observed 2026-08-25: after scanning it can
+  show no confirmation at all, so the scan looks like it failed. It did
+  not. Close and reopen the app and the entry is there. Do NOT rescan —
+  each attempt adds another duplicate, and they all generate the same
+  codes, so you cannot tell them apart afterwards.
+
 Then: ./tests/manual_totp.sh check
 ------------------------------------------------------------------
 MSG
