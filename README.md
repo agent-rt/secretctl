@@ -266,7 +266,7 @@ specifies a real second factor and records why it is not being built.
 
 ## Status
 
-v0.10.0. macOS arm64 only. Shipped: vault + CLI, Touch ID–gated unlock,
+v0.10.1. macOS arm64 only. Shipped: vault + CLI, Touch ID–gated unlock,
 `materialize` + Home Manager module, cross-Mac vault sync over git,
 offline TOTP approval when the screen is locked, `secretctl skill` for
 agents, and named failure codes on stderr. See `tests/e2e.sh`,
