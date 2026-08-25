@@ -94,7 +94,8 @@ It assumes `secretctl init` has already run and the secrets exist in the
 vault. See `nix/home-manager.nix` for all options.
 
 Homebrew and Nix are independent update tracks: bumping one does not
-move the other.
+move the other. `docs/RELEASING.md` has the versioning rule and the
+release steps.
 
 ## Touch ID and the key cache
 
