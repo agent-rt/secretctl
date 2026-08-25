@@ -96,7 +96,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) u8 {
         return 0;
     }
     if (std.mem.eql(u8, cmd, "--version")) {
-        tty.writeStdout("secretctl 0.8.1\n");
+        tty.writeStdout("secretctl 0.8.2\n");
         return 0;
     }
 
@@ -329,14 +329,24 @@ fn unlockSession(
         var totp_mk_id: [16]u8 = undefined;
         @memcpy(&totp_mk_id, blob[10..26]);
 
-        if (!totpEnrolled(&totp_mk_id)) {
-            // Fail closed, and say which of the two things is missing: nobody
-            // is at the machine, and there is no way to ask them.
-            tty.writeStderr("cannot authorize: ");
-            tty.writeStderr(authz_decision.reason);
-            tty.writeStderr("\n");
-            tty.writeStderr(authz.not_configured_hint);
-            return null;
+        switch (totpState(&totp_mk_id)) {
+            .enrolled => {},
+            .not_enrolled => {
+                // Fail closed, and say which of the two things is missing:
+                // nobody is at the machine, and there is no way to ask them.
+                tty.writeStderr("cannot authorize: ");
+                tty.writeStderr(authz_decision.reason);
+                tty.writeStderr("\n");
+                tty.writeStderr(authz.not_configured_hint);
+                return null;
+            },
+            .unreadable => {
+                tty.writeStderr("cannot authorize: ");
+                tty.writeStderr(authz_decision.reason);
+                tty.writeStderr("\n");
+                tty.writeStderr(totp_unreadable_hint);
+                return null;
+            },
         }
         if (!requestTotpApproval(allocator, p.home, &totp_mk_id, authz_decision.reason)) return null;
         // Approved. Fall through to the normal unlock: approval authorises the
@@ -1439,14 +1449,49 @@ fn runReveal(allocator: std.mem.Allocator, args: []const []const u8) u8 {
 /// Presence of the keychain item is the signal. Reading it needs the ACL, so a
 /// foreign binary cannot even answer this question (M5) — which is fine: it has
 /// no reason to.
-fn totpEnrolled(master_key_id: *const [16]u8) bool {
-    const seed = keychain_mod.fetchTotpSeed(std.heap.page_allocator, master_key_id) catch return false;
+/// Whether this vault has a usable TOTP seed.
+///
+/// Three states, not two. Collapsing them into a bool is what made an earlier
+/// version dangerous: any read failure looked like "never enrolled", so the gate
+/// advised `2fa enroll` — and following that advice overwrites a seed that was
+/// merely unreadable, silently killing the entry already in someone's phone.
+/// A transient keychain problem must never be presented as an invitation to
+/// destroy the enrolment.
+const TotpState = enum {
+    enrolled,
+    /// No item at all. `2fa enroll` is the right advice.
+    not_enrolled,
+    /// The item exists but could not be read — a stale trusted-app ACL after an
+    /// upgrade is the expected cause. The seed is probably intact; re-enrolling
+    /// would replace it.
+    unreadable,
+};
+
+fn totpState(master_key_id: *const [16]u8) TotpState {
+    const seed = keychain_mod.fetchTotpSeed(std.heap.page_allocator, master_key_id) catch |e| {
+        return switch (e) {
+            keychain_mod.Error.KeychainItemNotFound => .not_enrolled,
+            else => .unreadable,
+        };
+    };
     defer {
         mem_util.secureZero(u8, seed);
         std.heap.page_allocator.free(seed);
     }
-    return seed.len >= 16;
+    // A short item is corrupt, not absent: overwriting it is still a decision
+    // the operator should make explicitly.
+    return if (seed.len >= 16) .enrolled else .unreadable;
 }
+
+/// What to print when the seed is there but unreadable. Says plainly what not
+/// to do, because the obvious next move is the destructive one.
+const totp_unreadable_hint =
+    "the TOTP seed exists but could not be read from the keychain.\n" ++
+    "Do NOT run `secretctl 2fa enroll` — that replaces the seed and the entry\n" ++
+    "in your authenticator stops working. A stale trusted-app ACL after a\n" ++
+    "`brew upgrade` is the usual cause; run a command that unlocks the vault\n" ++
+    "from a terminal first, which re-establishes the keychain protector.\n" ++
+    "If the seed is genuinely lost, `secretctl 2fa disable` then re-enroll.\n";
 
 /// Path of the replay ledger. Not secret — it holds one integer — but 0600
 /// because everything in the vault directory is.
@@ -1560,10 +1605,20 @@ fn runTwoFactor(allocator: std.mem.Allocator, args: []const []const u8) u8 {
     @memcpy(&mk_id, blob[10..26]);
 
     if (std.mem.eql(u8, args[0], "enroll")) {
-        if (totpEnrolled(&mk_id)) {
-            tty.writeStderr("already enrolled. `secretctl 2fa disable` first if you want a new seed —\n" ++
-                "re-enrolling invalidates whatever your authenticator currently holds.\n");
-            return 1;
+        switch (totpState(&mk_id)) {
+            .not_enrolled => {},
+            .enrolled => {
+                tty.writeStderr("already enrolled. `secretctl 2fa disable` first if you want a new seed —\n" ++
+                    "re-enrolling invalidates whatever your authenticator currently holds.\n");
+                return 1;
+            },
+            // The load-bearing case. Overwriting here is exactly the data loss
+            // this whole distinction exists to prevent, so refuse and point at
+            // the explicit escape hatch rather than deciding for the operator.
+            .unreadable => {
+                tty.writeStderr(totp_unreadable_hint);
+                return 1;
+            },
         }
         var seed: [totp.seed_len]u8 = undefined;
         rand.bytes(&seed);
@@ -1588,10 +1643,18 @@ fn runTwoFactor(allocator: std.mem.Allocator, args: []const []const u8) u8 {
     }
 
     if (std.mem.eql(u8, args[0], "status")) {
-        if (!totpEnrolled(&mk_id)) {
-            tty.writeStdout("TOTP: not enrolled\n");
-            tty.writeStdout(authz.not_configured_hint);
-            return 1;
+        switch (totpState(&mk_id)) {
+            .enrolled => {},
+            .not_enrolled => {
+                tty.writeStdout("TOTP: not enrolled\n");
+                tty.writeStdout(authz.not_configured_hint);
+                return 1;
+            },
+            .unreadable => {
+                tty.writeStdout("TOTP: enrolled, but the seed is not readable right now\n");
+                tty.writeStderr(totp_unreadable_hint);
+                return 1;
+            },
         }
         tty.writeStdout("TOTP: enrolled (SHA1, 6 digits, 30s)\n");
         if (totpLastStep(allocator, p.home)) |st| {
@@ -1607,9 +1670,16 @@ fn runTwoFactor(allocator: std.mem.Allocator, args: []const []const u8) u8 {
     if (std.mem.eql(u8, args[0], "test")) {
         // A full verification that unlocks nothing, so the channel can be
         // checked without putting a real secret behind it.
-        if (!totpEnrolled(&mk_id)) {
-            tty.writeStderr(authz.not_configured_hint);
-            return 1;
+        switch (totpState(&mk_id)) {
+            .enrolled => {},
+            .not_enrolled => {
+                tty.writeStderr(authz.not_configured_hint);
+                return 1;
+            },
+            .unreadable => {
+                tty.writeStderr(totp_unreadable_hint);
+                return 1;
+            },
         }
         return if (requestTotpApproval(allocator, p.home, &mk_id, "2fa test, no secret involved")) 0 else 1;
     }
