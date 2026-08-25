@@ -96,7 +96,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) u8 {
         return 0;
     }
     if (std.mem.eql(u8, cmd, "--version")) {
-        tty.writeStdout("secretctl 0.8.0\n");
+        tty.writeStdout("secretctl 0.8.1\n");
         return 0;
     }
 
@@ -1534,7 +1534,10 @@ fn requestTotpApproval(
     // a corrupt ledger reads as empty.
     totpRecordStep(allocator, home, m.step);
     audit_mod.log("authz.approved", .cli, &.{audit_mod.s("method", "totp")});
-    tty.writeStdout("authorized\n");
+    // stderr, not stdout: stdout is the command's own output channel, and
+    // `list --json` shares it. Writing progress there made the JSON
+    // unparseable for exactly the callers most likely to be driving this path.
+    tty.writeStderr("authorized\n");
     return true;
 }
 
