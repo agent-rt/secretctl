@@ -27,6 +27,11 @@ jobs:
         run: bash tests/e2e_lockstate.sh
       - name: e2e (sync)
         run: bash tests/e2e_sync.sh
+      # Checks that every factual claim in `secretctl skill` is true. A skill
+      # file is read by something that acts on it, so a stale claim is worse
+      # than a missing one. No keychain items, no network.
+      - name: e2e (skill)
+        run: bash tests/e2e_skill.sh
 
   nix-build:
     name: nix build

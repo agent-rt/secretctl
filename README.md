@@ -4,8 +4,9 @@
 
 `secretctl` keeps your tokens, API keys, and SSH keys in a single
 encrypted file under `~/.secretctl/`. Agents (Claude Code, Codex, …)
-get *capability* access — they run commands with secrets injected via
-environment variables, but never see plaintext.
+run commands with secrets injected as environment variables, so values
+stay out of the agent's context — see the note on what that does and
+does not enforce, below.
 
 ```bash
 secretctl init                                # passphrase + Touch ID keychain
@@ -23,6 +24,8 @@ secretctl materialize SSH_KEY --out ~/.ssh/id_ed25519 --mode 0600
 secretctl sync                                # git pull/commit/push the vault
 secretctl reveal NPM_TOKEN                    # show plaintext on TTY only
 secretctl rm STALE_TOKEN
+
+secretctl skill                               # SKILL.md for an agent
 ```
 
 `secretctl --help` lists every command and flag; the binary's help is the
@@ -30,11 +33,18 @@ authoritative reference.
 
 ## Why
 
-- **Agent-first**: a project-local `.secretctl.toml` allowlist gates
-  which secrets reach which commands. An agent runs
+- **Agent-first**: an agent runs
   `secretctl exec --tag ai -- <allowlisted command>` and the secrets
-  arrive in the child's environment; it never handles plaintext itself,
-  and it cannot widen the allowlist from outside the file.
+  arrive in the child's environment, never in the agent's context. A
+  project-local `.secretctl.toml` gates which tags and commands `exec`
+  may use. `secretctl skill` emits the SKILL.md that tells an agent this.
+
+  **The allowlist gates `exec`, not the whole binary.** An agent that can
+  run shell commands can run `secretctl reveal` and read a value —
+  `.secretctl.toml` does not apply there, and `$SECRETCTL_BATCH` lifts the
+  terminal requirement. Treat it as scoping for the intended path, not as
+  containment; if you need the stronger property, the agent needs a
+  narrower shell, not a stricter config file.
 - **Encrypted metadata**: secret names, tags, and timestamps are
   inside the AEAD body. `strings(1)` on the vault file shows nothing
   useful — stronger than SOPS' field-level encryption.

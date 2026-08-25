@@ -69,6 +69,7 @@ pub const usage_text =
     \\  secretctl prune-keychain [--yes]     # remove stale secretctl keychain items from old vaults
     \\  secretctl agent [run|status|stop]    # cache the unlocked key to skip repeat Touch ID
     \\  secretctl 2fa [enroll|auth|revoke|status|test|disable]  # TOTP when locked
+    \\  secretctl skill                      # emit SKILL.md for an agent
     \\
     \\ENV:
     \\  $VISUAL / $EDITOR control which editor `edit` and `add --editor` launch.
@@ -118,6 +119,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) u8 {
     if (std.mem.eql(u8, cmd, "prune-keychain")) return runPruneKeychain(allocator, tail);
     if (std.mem.eql(u8, cmd, "agent")) return runAgent(allocator, tail);
     if (std.mem.eql(u8, cmd, "2fa")) return runTwoFactor(allocator, tail);
+    if (std.mem.eql(u8, cmd, "skill")) return runSkill(tail);
 
     tty.writeStderr("unknown command: ");
     tty.writeStderr(cmd);
@@ -1450,6 +1452,124 @@ fn runReveal(allocator: std.mem.Allocator, args: []const []const u8) u8 {
     tty.writeStdout("\n");
 
     audit_mod.log("reveal", .cli, &.{audit_mod.s("name", name)});
+    return 0;
+}
+
+// ------- skill -------
+
+/// `secretctl skill` — what an agent needs to know, in the shape agents read.
+///
+/// Static text, deliberately. It would be easy to interpolate the vault's
+/// secret names here, and wrong: a skill file gets copied into contexts,
+/// pasted into issues and committed to repos, and names are the one piece of
+/// vault metadata this tool otherwise keeps inside the AEAD. `list --json` is
+/// the live source and costs nothing.
+const skill_text =
+    \\---
+    \\name: secretctl
+    \\description: >-
+    \\  Read and use this project's secrets without ever handling plaintext.
+    \\  Use when a command needs an API key, token or credential, and when
+    \\  secretctl refuses because the screen is locked.
+    \\---
+    \\
+    \\# secretctl
+    \\
+    \\A shell command, not an MCP server. Secrets live encrypted in
+    \\`~/.secretctl/`; you run commands *through* it and the values arrive in
+    \\the child process's environment.
+    \\
+    \\```
+    \\secretctl list --json                        names and tags, never values
+    \\secretctl exec --tag ai -- CMD ARGS...       run CMD with those secrets in env
+    \\secretctl exec --only NAME -- CMD ARGS...    just one
+    \\```
+    \\
+    \\Names normalise to UPPER_SNAKE_CASE in the environment: `my-api-key`
+    \\arrives as `$MY_API_KEY`.
+    \\
+    \\## The one rule
+    \\
+    \\**Use `exec`. Do not read values.**
+    \\
+    \\Nothing stops you from running `secretctl reveal NAME` — it prints the
+    \\plaintext, and under `$SECRETCTL_BATCH` it does so without a terminal.
+    \\This is stated plainly rather than dressed up as impossible, because a
+    \\barrier you believe in and then discover is not there is worse than one
+    \\you were told to respect.
+    \\
+    \\Respect it. `reveal` is for a human looking at their own screen. Reading
+    \\a value into your context puts it in transcripts, logs and anywhere that
+    \\context is later copied; `exec` keeps it in a child process's
+    \\environment and out of yours.
+    \\
+    \\The same applies to the allowlist. A project-local `.secretctl.toml`
+    \\decides which tags and which commands `exec` may use — and it gates
+    \\`exec` only, not `reveal`. If `exec` says a command or tag is not
+    \\allowed, that is a decision to bring to the human. Do not route around
+    \\it by reading the secret another way.
+    \\
+    \\## When the screen is locked
+    \\
+    \\Touch ID needs a finger, so with the screen locked secretctl asks for a
+    \\6-digit TOTP code instead. You will see:
+    \\
+    \\```
+    \\authorization required: screen is locked, so Touch ID cannot be satisfied
+    \\no code supplied. Pass it on a dedicated fd, ...
+    \\```
+    \\
+    \\Ask the human for the current code from their authenticator, then:
+    \\
+    \\```
+    \\secretctl 2fa auth 123456        opens a 120s window; commands then need no code
+    \\secretctl 2fa status             is a window open? how long left?
+    \\```
+    \\
+    \\Or supply it per command, without a window:
+    \\
+    \\```
+    \\SECRETCTL_TOTP_FD=3 secretctl list --json 3<<<"123456"
+    \\```
+    \\
+    \\Codes are single use and roll every 30s. Without a window, **every**
+    \\command needs its own — which is why `2fa auth` exists for a sequence.
+    \\
+    \\## Do not
+    \\
+    \\- **Do not retry in a loop.** Each attempt asks a human for another code.
+    \\  One failure means ask; a second means something is wrong, so say so.
+    \\- **Do not run `secretctl 2fa enroll`** to fix an error. If secretctl
+    \\  says the seed is unreadable it tells you not to, and enrolling
+    \\  replaces the seed — the human's phone stops working and only they can
+    \\  repair it.
+    \\- **Do not put a passphrase or an enrolment token in a command line.**
+    \\  `ps` is world-readable. Those go on a dedicated fd. (A TOTP code may
+    \\  go on the command line: single use, 30s, spent on arrival.)
+    \\- **Do not run `secretctl prune-keychain`.** It deletes keychain items,
+    \\  and with a non-default `$SECRETCTL_HOME` it deletes the real vault's.
+    \\
+    \\## Exit codes
+    \\
+    \\`0` ok · `2` the request was wrong — unknown command, bad arguments, or
+    \\a secret name that does not exist · `1` it failed or refused: no vault,
+    \\wrong password, stopped at the authorization gate. The message on stderr
+    \\says which.
+    \\
+    \\So `2` means fix the request; `1` means something outside the request
+    \\needs to change, usually by asking the human.
+    \\
+    \\Machine-readable output goes to stdout and progress to stderr, so
+    \\`--json` stays parseable while a command is asking for authorization.
+    \\
+;
+
+fn runSkill(args: []const []const u8) u8 {
+    if (args.len != 0) {
+        tty.writeStderr("usage: secretctl skill\n");
+        return 2;
+    }
+    tty.writeStdout(skill_text);
     return 0;
 }
 
