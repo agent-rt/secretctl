@@ -634,8 +634,16 @@ locked-screen case is as bad as it is.
    **refuses with an actionable message** rather than silently consuming a
    line. Regression test: `tests/e2e_batch_channel.sh` asserts the stored
    value is correct across all four agent × keychain combinations.
-6. **`prune-keychain --yes` deletes other vaults' items with no confirmation**
-   (`cli.zig` prune path). *Found the hard way while testing; not yet fixed.*
+6. ~~**`prune-keychain --yes` deletes other vaults' items with no
+   confirmation**~~ — **fixed.** `--yes` is refused when `$SECRETCTL_HOME` is
+   not the default vault, with the reason and the way forward (unset it and
+   prune from the vault that owns the items). The dry run still works from
+   anywhere, because seeing the real vault's account listed as "would delete"
+   explains the hazard better than any prose. Naming the default path
+   explicitly still counts as the default — refusing that would be a lie about
+   what is dangerous. Guarded by `tests/e2e_prune_guard.sh`.
+
+   The original text, for the record: *Found the hard way while testing.*
    "Stale" is computed relative to whichever vault `$SECRETCTL_HOME` points
    at, so running it with a test or secondary home deletes the **real** vault's
    keychain item. There is no dry-run diff of *which* vault each item belongs

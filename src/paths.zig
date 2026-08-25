@@ -44,6 +44,22 @@ pub fn resolve(allocator: std.mem.Allocator) !Paths {
     };
 }
 
+/// True when `home` is the default `$HOME/.secretctl`.
+///
+/// Compares the resolved path rather than asking whether $SECRETCTL_HOME is
+/// set: pointing it explicitly at the default is still the default vault, and
+/// refusing that would be a lie about what is dangerous.
+///
+/// The caller that needs this is `prune-keychain`, whose notion of "stale" is
+/// "not belonging to the vault at $SECRETCTL_HOME" — which, from a secondary
+/// home, describes the *real* vault's live keychain item.
+pub fn isDefaultHome(home: []const u8) bool {
+    const h = getenv("HOME") orelse return false;
+    var buf: [1024]u8 = undefined;
+    const want = std.fmt.bufPrint(&buf, "{s}/.secretctl", .{std.mem.span(h)}) catch return false;
+    return std.mem.eql(u8, home, want);
+}
+
 const testing = std.testing;
 
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;

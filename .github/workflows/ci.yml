@@ -38,5 +38,10 @@ jobs:
       # job incidentally covered — and the only part of it worth keeping, since
       # nothing consumes the nix package. Costs a second instead of five
       # minutes, and catches a mismatch, which `nix build` never did.
+      # Guards a destructive command that already destroyed the real vault's
+      # keychain item once during this project's testing. No keychain writes:
+      # the refusal happens before enumeration.
+      - name: e2e (prune guard)
+        run: bash tests/e2e_prune_guard.sh
       - name: version strings agree
         run: bash tests/version_consistency.sh
