@@ -10,6 +10,21 @@
 # No keychain writes here: every assertion is about the refusal, which happens
 # before enumeration. That keeps it CI-safe, unlike the guard in
 # tests/local_totp_guard.sh which needs real items and hung the runner twice.
+#
+# ############################################################################
+# DO NOT FALSIFY THIS SUITE BY DISABLING THE GUARD AND RUNNING IT.
+#
+# The usual way to prove a guard is load-bearing — break it, watch the test go
+# red — destroys real data here. With the guard off, the `--yes` case below is
+# permitted, and from this non-default home "stale" means every keychain item
+# belonging to any *other* vault. On a developer's machine that is the real
+# vault's wrap key and TOTP seed. I did exactly this while writing the suite and
+# deleted both; the 2FA enrolment had to be redone from the phone up.
+#
+# If the guard's behaviour needs re-checking, reason about the condition in
+# `cli.zig` or exercise `paths.isDefaultHome` directly. There is no version of
+# "just try it and see" that is safe for this one.
+# ############################################################################
 
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

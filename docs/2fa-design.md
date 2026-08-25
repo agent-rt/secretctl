@@ -644,6 +644,14 @@ locked-screen case is as bad as it is.
    what is dangerous. Guarded by `tests/e2e_prune_guard.sh`.
 
    The original text, for the record: *Found the hard way while testing.*
+
+   Found the hard way **twice**. The second time was falsifying the guard: with
+   the condition disabled, the suite's own `--yes` case ran for real from a
+   non-default home and deleted the live vault's wrap key and TOTP seed — the
+   exact loss the guard exists to prevent, caused by checking that it prevents
+   it. `tests/e2e_prune_guard.sh` now carries a banner saying so, because the
+   reflex it violates ("break it and watch the test go red") is normally the
+   right one and will be reached for again.
    "Stale" is computed relative to whichever vault `$SECRETCTL_HOME` points
    at, so running it with a test or secondary home deletes the **real** vault's
    keychain item. There is no dry-run diff of *which* vault each item belongs
