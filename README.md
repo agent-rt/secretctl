@@ -125,7 +125,7 @@ ask for a secret. `secretctl` detects the lock state before it touches the
 keychain or the key cache, and asks for a TOTP code instead:
 
 ```bash
-secretctl 2fa enroll     # prints an otpauth:// URI for your authenticator
+secretctl 2fa enroll     # prints a scannable QR, and the otpauth:// URI
 secretctl 2fa status     # enrolled? which code was last spent?
 secretctl 2fa disable    # forget the seed; a locked screen goes back to refusing
 
@@ -133,6 +133,11 @@ secretctl 2fa disable    # forget the seed; a locked screen goes back to refusin
 SECRETCTL_TOTP_FD=3 secretctl 2fa test 3<<<"123456"
 SECRETCTL_TOTP_FD=3 secretctl list 3<<<"123456"
 ```
+
+`enroll` draws the QR in the terminal, so there is no step where you have
+to turn a URI into a code yourself — which is where enrolment actually goes
+wrong. The URI is printed underneath and is the source of truth; if the
+terminal is too narrow the QR is skipped and says so.
 
 **Fully offline.** No service to run, no relay to trust, nothing to reach
 over the network. Standard RFC 6238 (SHA-1, 6 digits, 30s), so any
@@ -208,7 +213,7 @@ specifies a real second factor and records why it is not being built.
 
 ## Status
 
-v0.8.2. macOS arm64 only. Shipped: vault + CLI, Touch ID–gated unlock,
+v0.9.0. macOS arm64 only. Shipped: vault + CLI, Touch ID–gated unlock,
 `materialize` + Home Manager module, cross-Mac vault sync over git, and
 offline TOTP approval when the screen is locked. See `tests/e2e.sh`,
 `tests/e2e_sync.sh`, and `tests/e2e_lockstate.sh` for the behavior

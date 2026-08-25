@@ -13,6 +13,7 @@ const aes = @import("aes_gcm.zig");
 const protector_mod = @import("protector.zig");
 const keychain_mod = @import("keychain.zig");
 const totp = @import("totp.zig");
+const qr = @import("qr.zig");
 const master_key_mod = @import("master_key.zig");
 const vault_mod = @import("vault.zig");
 const edit_view = @import("edit_view.zig");
@@ -96,7 +97,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) u8 {
         return 0;
     }
     if (std.mem.eql(u8, cmd, "--version")) {
-        tty.writeStdout("secretctl 0.8.2\n");
+        tty.writeStdout("secretctl 0.9.0\n");
         return 0;
     }
 
@@ -1634,7 +1635,23 @@ fn runTwoFactor(allocator: std.mem.Allocator, args: []const []const u8) u8 {
             mem_util.secureZero(u8, uri);
             allocator.free(uri);
         }
-        tty.writeStdout("Add this to your authenticator app:\n\n  ");
+        tty.writeStdout("Scan this with your authenticator app:\n\n");
+        // The QR is a convenience; the URI below it is the source of truth.
+        // A terminal too narrow to hold the code, or an encoder that fails,
+        // must not cost someone their enrolment — so it degrades to the URI
+        // rather than erroring out.
+        var qr_out: std.ArrayList(u8) = .empty;
+        defer qr_out.deinit(allocator);
+        if (qr.render(uri, tty.terminalCols(), &qr_out, allocator)) |_| {
+            tty.writeStdout(qr_out.items);
+            tty.writeStdout("\n");
+        } else |e| {
+            tty.writeStdout(switch (e) {
+                qr.Error.TooWide => "  (terminal too narrow for the QR — widen it and re-run, or use the URI)\n\n",
+                else => "  (could not render a QR here — use the URI)\n\n",
+            });
+        }
+        tty.writeStdout("Or paste this URI, which is what the QR encodes:\n\n  ");
         tty.writeStdout(uri);
         tty.writeStdout("\n\nThen confirm it round-trips before relying on it:\n");
         tty.writeStdout("  SECRETCTL_TOTP_FD=3 secretctl 2fa test 3<<<\"123456\"\n");
