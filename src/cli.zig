@@ -98,7 +98,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) u8 {
         return 0;
     }
     if (std.mem.eql(u8, cmd, "--version")) {
-        tty.writeStdout("secretctl 0.9.0\n");
+        tty.writeStdout("secretctl 0.10.0\n");
         return 0;
     }
 
