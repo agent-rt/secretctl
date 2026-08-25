@@ -221,11 +221,18 @@ having both.
 The mitigation that needs no code change is to do the work in one
 `secretctl exec` rather than a sequence of commands — one invocation, one code.
 
-If that proves insufficient in real use, the candidate fix is a short grace
-window after a verified code, during which the locked path may use the cache.
-That reintroduces precisely the unauthorized window this section exists to
-document, so it should be driven by evidence that the current behaviour
-obstructs something, not by anticipation.
+**Built, as `2fa auth`.** The evidence arrived by using it: handing over one
+code per command, waiting up to 30 s between them, is fine for one secret and
+not for a sequence. A verified code now opens a 120 s window during which the
+locked path authorizes without one.
+
+The cost is exactly what this section describes, and it is not hidden: for those
+120 s a locked screen authorizes local commands with no further confirmation.
+What bounds it — the deadline is absolute, so a suspend does not extend it;
+`2fa revoke` closes it immediately; every use is logged as `authz.window_used`
+with the remaining time, so the audit trail still separates unlocks a human
+authorized from ones the window covered; and the opening code is spent like any
+other, so a window cannot be used to recycle one.
 
 ---
 

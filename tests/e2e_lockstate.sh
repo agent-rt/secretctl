@@ -167,6 +167,82 @@ else
   bad "locked: a spent code was accepted again" "rc=$rc ${out:0:160}"
 fi
 
+# ---------- the 120s authorization window ----------
+# One code buys a window instead of a single command. That window is exactly
+# what `authz.decide()` sitting above the key cache exists to prevent, reopened
+# deliberately — so it has to be bounded, revocable, and visible.
+#
+# No keychain manipulation here: the window is a plain 0600 file, so this stays
+# CI-safe. The guard that does need real keychain items lives in
+# tests/local_totp_guard.sh, out of CI, after it hung the runner twice.
+#
+# Re-enrolled first, deliberately. The assertions above spend codes, and the
+# replay ledger then only accepts last_used+1 — which is outside the ±1 skew
+# window unless 30s have passed. A fresh seed has no spent steps. Without this
+# the block failed to open a window at all, and its final assertion ("a spent
+# code cannot open a second window") passed for the wrong reason: the code was
+# already spent before it got there.
+sc 2fa disable >/dev/null 2>&1
+SECRET=$(sc 2fa enroll 2>&1 | sed -n 's/.*secret=\([A-Z2-7]*\).*/\1/p')
+[[ -n "$SECRET" ]] || bad "window: could not re-enroll for an isolated seed"
+
+set +e
+out=$(SECRETCTL_FORCE_LOCKED=1 "$BIN" list --json 2>&1); rc=$?
+set -e
+[[ $rc -ne 0 ]] && ok "window: closed by default — a bare command is refused" \
+                || bad "window: something was already open" "${out:0:100}"
+
+out=$(SECRETCTL_FORCE_LOCKED=1 "$BIN" 2fa auth "$(totp_code)" 2>&1 || true)
+grep -q "authorized for" <<<"$out" \
+  && ok "window: 2fa auth opens it" \
+  || bad "window: 2fa auth did not open one" "${out:0:120}"
+
+set +e
+out=$(SECRETCTL_FORCE_LOCKED=1 SECRETCTL_PASSPHRASE_FD=4 "$BIN" list --json 4<<<"$PASS" 2>/dev/null); rc=$?
+set -e
+grep -q '"name":"TOK"' <<<"$out" \
+  && ok "window: a locked command needs no code while it is open" \
+  || bad "window: open window did not authorize" "rc=$rc ${out:0:120}"
+
+grep -q "window OPEN" <<<"$(sc 2fa status 2>&1 || true)" \
+  && ok "window: status shows it open, with time left" \
+  || bad "window: status does not report it"
+
+sc 2fa revoke >/dev/null 2>&1
+set +e
+out=$(SECRETCTL_FORCE_LOCKED=1 "$BIN" list --json 2>&1); rc=$?
+set -e
+[[ $rc -ne 0 ]] && ok "window: revoke closes it immediately" \
+                || bad "window: still open after revoke" "${out:0:100}"
+
+# An expired window must close on its own. Written directly rather than waited
+# out: the deadline is the file's whole content, so a past value exercises the
+# same branch as 120s of patience. This is the assertion that makes the bound
+# real rather than nominal.
+out=$(SECRETCTL_FORCE_LOCKED=1 "$BIN" 2fa auth "$(totp_code 1)" 2>&1 || true)
+if grep -q "authorized for" <<<"$out"; then
+  echo "1" > "$SECRETCTL_HOME/totp.window"    # deadline in 1970
+  set +e
+  out=$(SECRETCTL_FORCE_LOCKED=1 "$BIN" list --json 2>&1); rc=$?
+  set -e
+  [[ $rc -ne 0 ]] && ok "window: an expired deadline stops authorizing" \
+                  || bad "window: expired window still authorized" "${out:0:100}"
+  grep -q "window closed" <<<"$(sc 2fa status 2>&1 || true)" \
+    && ok "window: status reports an expired one as closed" \
+    || bad "window: status still calls an expired window open"
+else
+  bad "window: could not open one to expire" "${out:0:100}"
+fi
+sc 2fa revoke >/dev/null 2>&1
+
+# The code that opened a window is spent like any other — a window must not be
+# a way to reuse one.
+out=$(SECRETCTL_FORCE_LOCKED=1 "$BIN" 2fa auth "$(totp_code)" 2>&1 || true)
+grep -qi "already used" <<<"$out" \
+  && ok "window: the opening code is still single-use" \
+  || bad "window: a spent code opened a second window" "${out:0:120}"
+sc 2fa revoke >/dev/null 2>&1
+
 # Disabling puts it back to refusing outright.
 sc 2fa disable >/dev/null 2>&1
 set +e

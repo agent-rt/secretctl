@@ -159,7 +159,36 @@ from "that one is gone, wait 30s". This matters because the code travels
 through whatever channel you used to hand it over — a chat window, a
 terminal someone can scroll back through.
 
-### One code per command, while locked
+### One code buys 120 seconds
+
+```bash
+secretctl 2fa auth 123456    # opens a 120s window
+secretctl 2fa revoke         # closes it early
+secretctl 2fa status         # shows whether one is open, and how long is left
+```
+
+Without this, every command run while locked needs its own fresh code, and
+codes roll every 30s — workable for one secret, painful for a sequence.
+
+**This is a deliberate hole, bounded.** For those 120 seconds a locked screen
+authorizes local commands with no further confirmation, which is exactly what
+the authorization check sitting above the key cache otherwise prevents. It is
+short so that walking away closes it soon; the deadline is absolute, so
+suspending the machine does not extend it; `revoke` closes it immediately; and
+every use is written to the audit log as `authz.window_used` with the time
+remaining, so afterwards you can tell which unlocks a human authorized from
+which the window covered.
+
+The code that opens a window is spent like any other — a window is not a way to
+reuse one.
+
+Unlike the master passphrase, the code may go on the command line. It is
+single-use, expires in 30s, and is consumed by the command carrying it, and in
+the flow this exists for it has already travelled through a chat window; `ps` is
+not the weak link. `secretctl 2fa auth` with no argument reads it from
+`$SECRETCTL_TOTP_FD` or the terminal instead.
+
+### One code per command, without a window
 
 The key cache does **not** shorten this. Measured, with the cache warm:
 
@@ -181,10 +210,9 @@ this is fine. For a sequence of commands it is not: you would be feeding
 codes one at a time with a wait between each. Do the work in a single
 `secretctl exec` instead; that is what it is for, and it costs one code.
 
-This is a deliberate trade, not a defect to be worked around silently. If
-it turns out to obstruct real use, the fix is a short grace window after a
-verified code — which would reintroduce exactly the unauthorized window
-described above, so it wants evidence first.
+That was the behaviour before `2fa auth` existed, and it is still what you
+get without one. The window above is the answer to it, with its cost stated
+rather than hidden.
 
 Set `SECRETCTL_FORCE_LOCKED=0` or `=1` to pin the lock state — needed by
 every test suite, since otherwise the result depends on whether someone
