@@ -27,16 +27,12 @@ pub const jsonx = @import("jsonx.zig");
 pub const local_auth = @import("local_auth.zig");
 pub const lockstate = @import("lockstate.zig");
 pub const authz = @import("authz.zig");
-pub const p256 = @import("p256.zig");
-pub const http = @import("http.zig");
-pub const push_auth = @import("push_auth.zig");
-pub const p256_test = @import("p256_test.zig");
 pub const agent = @import("agent.zig");
 
 test {
     const std = @import("std");
     std.testing.refAllDecls(@This());
-    inline for (.{ mem, rand, clock, aes, argon2, protector, keychain, master_key, envelope, codec, fsx, vault, tty, edit_view, list_view, policy, audit, paths, cli, editor, jsonx, totp, local_auth, lockstate, authz, p256, p256_test, http, push_auth, agent }) |m| {
+    inline for (.{ mem, rand, clock, aes, argon2, protector, keychain, master_key, envelope, codec, fsx, vault, tty, edit_view, list_view, policy, audit, paths, cli, editor, jsonx, totp, local_auth, lockstate, authz, agent }) |m| {
         std.testing.refAllDecls(m);
     }
 }

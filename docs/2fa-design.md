@@ -33,6 +33,11 @@ labelled as measured when only its narrower ancestor was — so treat every
 "measured" tag here as covering exactly what the Method column says and nothing
 adjacent to it.
 
+> **The transport changed in v0.8.0.** §4.6 and `2fa-push-approval.md` describe
+> approval arriving over a relay and a phone push. That was built and then
+> removed in favour of offline TOTP; see the note on TOTP under §4.1, which this
+> document originally dismissed for a reason M5 invalidated.
+
 > **MCP was removed in v0.7.0.** This document predates that and refers to
 > `secretctl mcp`, `mcp_tools.zig`, `get_secret` and `run_with_secrets`
 > throughout. Those references are left as written: they are the record of what
@@ -318,13 +323,26 @@ already in a conversation with the agent; the agent surfaces
 `secretctl approve <id>` in chat. Push notification (§4.6) is a UX upgrade,
 not a prerequisite.
 
-> Note on TOTP. A TOTP front-end fits this broker cleanly and is convenient
-> (six digits beats a long passphrase over a phone keyboard). But it must be
-> understood as an *approval channel*, not a factor: the seed would live in
-> the same keychain as the wrap key, so anyone who can read the keychain can
-> mint codes. Per §2 it does not move the adversary's cost. Ship it, if at
-> all, as ergonomics on top of a real second factor — never as the second
-> factor.
+> Note on TOTP. **This is what shipped in v0.8.0**, and the paragraph below is
+> kept because its conclusion was wrong for an instructive reason.
+>
+> The original text: *"A TOTP front-end fits this broker cleanly and is
+> convenient (six digits beats a long passphrase over a phone keyboard). But it
+> must be understood as an approval channel, not a factor: the seed would live
+> in the same keychain as the wrap key, so anyone who can read the keychain can
+> mint codes. Per §2 it does not move the adversary's cost. Ship it, if at all,
+> as ergonomics on top of a real second factor — never as the second factor."*
+>
+> The first half stands: TOTP is an approval channel, not a factor, and six
+> digits can never be key material. The dismissal does not. It rested on §2's
+> "does not move the adversary's cost", which in turn rested on the M3 over-read
+> that **M5 falsified** — "anyone who can read the keychain" turns out to be
+> nobody but this binary. A hostile process cannot read the seed and cannot skip
+> the check, because its only route to the vault runs through the binary that
+> enforces it.
+>
+> So a consent gate is not ergonomics on top of security here; post-M5 it *is*
+> the perimeter, subject to §1.4's warm-cache row.
 
 ### 4.2 Protector type 5 — two-of-two
 

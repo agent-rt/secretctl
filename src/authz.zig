@@ -2,8 +2,13 @@
 //!
 //! Touch ID needs a finger on the sensor, so it only counts as authorization
 //! when someone is at the machine. When the screen is locked — or there is no
-//! GUI session at all — approval has to come from somewhere else, which is what
-//! `docs/2fa-push-approval.md` specifies.
+//! GUI session at all — approval has to come from somewhere else: a TOTP code
+//! read off an authenticator app (`totp.zig`).
+//!
+//! Whether that channel is *set up* is deliberately not answered here. It needs
+//! the vault's master_key_id to locate the seed, which `cli.openVault` has and
+//! this module should not: keeping the "which method" decision free of vault
+//! state is what makes it testable without a vault at all.
 //!
 //! This module answers only "which method", never "is it allowed". The methods
 //! themselves live elsewhere; keeping the decision separate is what makes it
@@ -11,7 +16,6 @@
 
 const std = @import("std");
 const lockstate = @import("lockstate.zig");
-const fsx = @import("fsx.zig");
 
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
 
@@ -56,24 +60,9 @@ pub fn decide() Decision {
     };
 }
 
-/// True when out-of-band approval is configured for this vault.
-///
-/// Split from `decide()` because "nobody is here" and "there is a way to ask
-/// them" are different facts, and the operator needs to be told which one is
-/// missing. Until the push client lands this is always false, so a locked
-/// screen refuses with instructions rather than appearing to work.
-pub fn outOfBandConfigured(secretctl_home: []const u8) bool {
-    // Presence of the config is the signal. Its contents are the push client's
-    // business, not this module's. Uses fsx rather than std.fs to match the
-    // rest of the project, which wraps stat(2) directly.
-    var buf: [1024]u8 = undefined;
-    const path = std.fmt.bufPrint(&buf, "{s}/push.json", .{secretctl_home}) catch return false;
-    return fsx.fileExists(path);
-}
-
 /// Message for a refusal, so every call site says the same thing.
 pub const not_configured_hint =
-    "out-of-band approval is not set up for this vault; run `secretctl 2fa enroll`\n" ++
+    "no offline approval is set up for this vault; run `secretctl 2fa enroll`\n" ++
     "or unlock the screen to use Touch ID\n";
 
 test "unlocked screen selects Touch ID" {
@@ -100,6 +89,4 @@ test "an unknown session fails closed rather than reaching for a sensor" {
     try std.testing.expectEqual(Method.out_of_band, m);
 }
 
-test "missing config reads as not configured" {
-    try std.testing.expect(!outOfBandConfigured("/nonexistent/secretctl-home"));
-}
+

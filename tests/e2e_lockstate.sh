@@ -92,45 +92,74 @@ fi
 "$BIN" agent stop >/dev/null 2>&1 || true
 export SECRETCTL_AGENT=0
 
-# ---------- configured but unreachable: still refuses ----------
-# Approval is what lets a locked screen skip the biometric gate
-# (keychain.Gate), so the gate must open only for a verdict that actually
-# verified. Merely *having* push.json must not be enough — otherwise dropping a
-# file into $SECRETCTL_HOME would be the whole 2FA bypass.
-#
-# 127.0.0.1:1 is https (http.zig refuses anything else before connecting) and
-# refuses the connection immediately, so this stays fast and offline.
-cat > "$SECRETCTL_HOME/push.json" <<'JSON'
-{
-  "worker_url": "https://127.0.0.1:1",
-  "app_id": "app-e2e",
-  "client_id": "client-e2e",
-  "client_secret": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-  "timeout_s": 5,
-  "devices": [
-    {"device_id": "dev-e2e", "sign_pubkey": "AAAA", "seal_pubkey": "AAAA",
-     "fingerprint": "0000-0000-0000-0000", "label": "not a real phone"}
-  ]
+# ---------- locked + TOTP ----------
+# The offline approval channel. Codes are generated here by an INDEPENDENT
+# implementation (python's hmac), which is the point: it proves the codes an
+# authenticator app would produce are the codes this accepts. Verifying with
+# secretctl's own generator would prove only self-consistency.
+command -v python3 >/dev/null 2>&1 || { echo "  FAIL python3 needed to generate TOTP codes"; exit 1; }
+
+SECRET=$(sc 2fa enroll 2>&1 | sed -n 's/.*secret=\([A-Z2-7]*\).*/\1/p')
+[[ -n "$SECRET" ]] && ok "2fa enroll emits an otpauth secret" \
+                   || bad "enroll produced no secret"
+
+totp_code() {
+  python3 - "$SECRET" "${1:-0}" <<'PY'
+import sys, hmac, hashlib, struct, base64, time
+sec = base64.b32decode(sys.argv[1] + "=" * (-len(sys.argv[1]) % 8))
+step = int(time.time()) // 30 + int(sys.argv[2])
+mac = hmac.new(sec, struct.pack('>Q', step), hashlib.sha1).digest()
+o = mac[19] & 0x0f
+v = ((mac[o] & 0x7f) << 24) | (mac[o+1] << 16) | (mac[o+2] << 8) | mac[o+3]
+print(f"{v % 10**6:06d}")
+PY
 }
-JSON
-chmod 600 "$SECRETCTL_HOME/push.json"
 
+# Wrong, malformed, and far-future codes must all be refused.
+for bad_code in "000000" "12345" "abcdef" "$(totp_code 100)"; do
+  set +e
+  out=$(SECRETCTL_FORCE_LOCKED=1 SECRETCTL_TOTP_FD=3 "$BIN" list --json 3<<<"$bad_code" 2>&1); rc=$?
+  set -e
+  if [[ $rc -ne 0 ]] && ! grep -q '"name":"TOK"' <<<"$out"; then
+    ok "locked: refuses code '$bad_code'"
+  else
+    bad "locked: accepted a bad code '$bad_code'" "${out:0:120}"
+  fi
+done
+
+# A correct, unspent code authorizes; this vault has no keychain protector, so
+# the passphrase still has to produce the key afterwards. Two separate fds,
+# which is also the assertion: the code channel and the passphrase channel must
+# not collide (they did once, when both shared stdin).
+CODE=$(totp_code)
 set +e
-out=$(locked list --json 2>&1); rc=$?
+out=$(SECRETCTL_FORCE_LOCKED=1 SECRETCTL_TOTP_FD=3 SECRETCTL_PASSPHRASE_FD=4 \
+      "$BIN" list --json 3<<<"$CODE" 4<<<"$PASS" 2>&1); rc=$?
 set -e
-if [[ $rc -ne 0 ]]; then
-  ok "locked + unreachable approval service: refuses (rc=$rc)"
-else
-  bad "an unreachable approval service still unlocked" "$out"
-fi
 grep -q '"name":"TOK"' <<<"$out" \
-  && bad "secret leaked without an approved verdict" "${out:0:160}" \
-  || ok "locked + unreachable: no vault contents in the output"
-grep -qi "master password" <<<"$out" \
-  && bad "locked + configured: fell through to a passphrase prompt" "${out:0:160}" \
-  || ok "locked + configured: still no passphrase prompt"
+  && ok "locked: a valid TOTP code unlocks the vault" \
+  || bad "locked: valid code did not unlock" "rc=$rc ${out:0:160}"
 
-rm -f "$SECRETCTL_HOME/push.json"
+# ...and only once. Replay is the failure mode that matters here: the code
+# travels through whatever channel the operator used to hand it over.
+set +e
+out=$(SECRETCTL_FORCE_LOCKED=1 SECRETCTL_TOTP_FD=3 SECRETCTL_PASSPHRASE_FD=4 \
+      "$BIN" list --json 3<<<"$CODE" 4<<<"$PASS" 2>&1); rc=$?
+set -e
+if [[ $rc -ne 0 ]] && grep -qi "already used" <<<"$out"; then
+  ok "locked: the same code is refused as replay, with a distinct message"
+else
+  bad "locked: a spent code was accepted again" "rc=$rc ${out:0:160}"
+fi
+
+# Disabling puts it back to refusing outright.
+sc 2fa disable >/dev/null 2>&1
+set +e
+out=$(SECRETCTL_FORCE_LOCKED=1 SECRETCTL_TOTP_FD=3 "$BIN" list --json 3<<<"$(totp_code)" 2>&1); rc=$?
+set -e
+[[ $rc -ne 0 ]] && grep -q "2fa enroll" <<<"$out" \
+  && ok "locked: after disable, refuses and says how to re-enable" \
+  || bad "locked: still accepted a code after disable" "${out:0:160}"
 
 # ---------- the override fails closed ----------
 set +e

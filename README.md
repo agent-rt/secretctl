@@ -106,7 +106,7 @@ background agent caches the unlocked master key with a sliding TTL
 `secretctl agent status`, drop the cache with `secretctl agent stop`.
 
 `reveal` does **not** use the cache — it hands plaintext straight to
-whoever asked, so it always costs a fresh Touch ID (or phone approval while
+whoever asked, so it always costs a fresh Touch ID (or a TOTP code while
 locked). Cached unlocks are recorded in the audit log as `unlock.cached`, so
 afterwards you can tell which unlocks a human authorized from which ones the
 cache served for free.
@@ -122,39 +122,48 @@ while the cache is warm; a short TTL is what bounds that.
 Touch ID needs a finger on the sensor, so with the screen locked there is
 nothing to give it — and that is exactly when an agent is most likely to
 ask for a secret. `secretctl` detects the lock state before it touches the
-keychain or the key cache, and asks a paired phone to approve instead:
+keychain or the key cache, and asks for a TOTP code instead:
 
 ```bash
-# The enrolment token goes on its own fd, never argv — `ps` is world-readable.
-SECRETCTL_ENROL_FD=3 secretctl 2fa enroll \
-  --worker https://your-approval-service.example --app-id secretctl \
-  --label "this mac" 3<<<"$TOKEN"
+secretctl 2fa enroll     # prints an otpauth:// URI for your authenticator
+secretctl 2fa status     # enrolled? which code was last spent?
+secretctl 2fa disable    # forget the seed; a locked screen goes back to refusing
 
-secretctl 2fa status     # show paired devices; compare fingerprints with the phone
-secretctl 2fa test       # a full round trip that touches no secret
+# The code goes on its own fd, never argv — `ps` is world-readable.
+SECRETCTL_TOTP_FD=3 secretctl 2fa test 3<<<"123456"
+SECRETCTL_TOTP_FD=3 secretctl list 3<<<"123456"
 ```
 
-This needs an **approval service you run yourself** — the relay that holds
-the request and pushes it to your phone. `secretctl` treats it as
-untrusted: every verdict is verified against a device key pinned at
-pairing, so a service that fabricates an approval produces a signature
-this refuses. The reference implementation is not published yet;
-`docs/2fa-push-approval.md` is the wire protocol if you want to write one.
+**Fully offline.** No service to run, no relay to trust, nothing to reach
+over the network. Standard RFC 6238 (SHA-1, 6 digits, 30s), so any
+authenticator works — 1Password, Raivo, Google Authenticator, whatever you
+already have.
 
-Without a paired device a locked screen simply refuses, and says so.
+The intended flow is that an agent asks, you read six digits off your
+phone, and you hand them over on the fd. Without an enrolment a locked
+screen simply refuses, and says so.
+
+Each code is **single use**: `secretctl` records the time step it spent and
+refuses that code again, with a message that distinguishes "wrong code"
+from "that one is gone, wait 30s". This matters because the code travels
+through whatever channel you used to hand it over — a chat window, a
+terminal someone can scroll back through.
 
 Set `SECRETCTL_FORCE_LOCKED=0` or `=1` to pin the lock state — needed by
 every test suite, since otherwise the result depends on whether someone
 happens to be looking at the screen.
 
-Approval is a **consent gate**, not a second cryptographic factor. What
-that does and does not mean, measured rather than assumed:
+A TOTP code is a **consent gate**, not a second cryptographic factor — six
+digits carry ~20 bits, so a code can never be key material, and verifying
+one needs the seed stored locally. What that does and does not mean,
+measured rather than assumed:
 
 - A process that is not `secretctl` **cannot** read the vault's wrap key.
   The keychain item's ACL names one binary; anything else gets
   `errSecAuthFailed`, or a dialog if it allows interaction.
 - What it can do is *ask* `secretctl`, and then it meets the same gates you
-  do. With the screen locked that means phone approval.
+  do. With the screen locked that means a TOTP code. It cannot mint one
+  either: the seed lives under the same ACL as the wrap key.
 - The gap: with the screen **unlocked and the key cache warm**
   (`SECRETCTL_AGENT=1`), a local caller can get a secret through `exec` with
   no prompt at all. `reveal` is excluded from the cache, so it always
@@ -167,9 +176,9 @@ specifies a real second factor and records why it is not being built.
 
 ## Status
 
-v0.7.0. macOS arm64 only. Shipped: vault + CLI, Touch ID–gated unlock,
+v0.8.0. macOS arm64 only. Shipped: vault + CLI, Touch ID–gated unlock,
 `materialize` + Home Manager module, cross-Mac vault sync over git, and
-out-of-band approval when the screen is locked. See `tests/e2e.sh`,
+offline TOTP approval when the screen is locked. See `tests/e2e.sh`,
 `tests/e2e_sync.sh`, and `tests/e2e_lockstate.sh` for the behavior
 contract.
 
@@ -181,10 +190,10 @@ changes. `list`, `exec` and the allowlist were what the three safe tools
 wrapped; `get_secret` has no CLI equivalent by design, and `reveal` is
 TTY-only.
 
-The locked-screen path is verified end to end for everything that does not
-need hardware: a real screen, a real phone, and a push round trip are
-covered by `tests/manual_locked_approval.sh`, which is a script rather than
-a claim because it needs a human to tap a notification.
+The locked-screen path is verified end to end in `tests/e2e_lockstate.sh`,
+including a real unlock with a code generated by an independent
+implementation — which is what proves an authenticator app's codes are the
+codes this accepts.
 
 ## License
 

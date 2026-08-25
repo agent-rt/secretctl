@@ -34,7 +34,7 @@ pub fn build(b: *std.Build) void {
         exe_mod.linkFramework("Foundation", .{});
         // CGSessionCopyCurrentDictionary, for screen-lock state.
         exe_mod.linkFramework("CoreGraphics", .{});
-        for ([_][]const u8{ "src/local_auth.m", "src/lockstate.m", "src/http.m" }) |f| {
+        for ([_][]const u8{ "src/local_auth.m", "src/lockstate.m" }) |f| {
             exe_mod.addCSourceFile(.{
                 .file = b.path(f),
                 .flags = &.{ "-fobjc-arc", "-Wno-everything" },
@@ -71,7 +71,7 @@ pub fn build(b: *std.Build) void {
         test_mod.linkFramework("LocalAuthentication", .{});
         test_mod.linkFramework("Foundation", .{});
         test_mod.linkFramework("CoreGraphics", .{});
-        for ([_][]const u8{ "src/local_auth.m", "src/lockstate.m", "src/http.m" }) |f| {
+        for ([_][]const u8{ "src/local_auth.m", "src/lockstate.m" }) |f| {
             test_mod.addCSourceFile(.{
                 .file = b.path(f),
                 .flags = &.{ "-fobjc-arc", "-Wno-everything" },
