@@ -140,6 +140,21 @@ grep -q '"name":"TOK"' <<<"$out" \
   && ok "locked: a valid TOTP code unlocks the vault" \
   || bad "locked: valid code did not unlock" "rc=$rc ${out:0:160}"
 
+# The same output must be machine-parseable. Asserted by actually parsing it,
+# on stdout alone — every other assertion here greps, which is why "authorized"
+# being written to stdout survived into a release and was caught only by a real
+# end-to-end run. One code, two assertions: a second unlock would need a second
+# code, which is the behaviour under test elsewhere.
+set +e
+raw=$(SECRETCTL_FORCE_LOCKED=1 SECRETCTL_TOTP_FD=3 SECRETCTL_PASSPHRASE_FD=4 \
+      "$BIN" list --json 3<<<"$(totp_code 1)" 4<<<"$PASS" 2>/dev/null)
+set -e
+if python3 -c 'import sys,json; json.load(sys.stdin)' <<<"$raw" >/dev/null 2>&1; then
+  ok "locked: --json stays parseable when a TOTP code authorized it"
+else
+  bad "locked: --json is polluted by progress text on stdout" "${raw:0:120}"
+fi
+
 # ...and only once. Replay is the failure mode that matters here: the code
 # travels through whatever channel the operator used to hand it over.
 set +e
