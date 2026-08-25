@@ -2334,6 +2334,33 @@ fn runPruneKeychain(allocator: std.mem.Allocator, args: []const []const u8) u8 {
     keychain_mod.totpAccountFor(&mk_id, &keep_totp_buf);
     const keep_totp = keep_totp_buf[0..];
 
+    // "Stale" here means "not belonging to the vault at $SECRETCTL_HOME". From a
+    // secondary home that description covers the *real* vault's live keychain
+    // item, and deleting it does not self-heal — the operator gets a password
+    // prompt they cannot explain, on a vault they were not even working on.
+    //
+    // This is not hypothetical: it happened during this project's own testing,
+    // and the mitigation until now was a note telling people not to run the
+    // command. A destructive tool that is safe only if you remember not to use
+    // it is the tool being wrong, not the memory.
+    //
+    // The dry run still works from anywhere — seeing the real vault's account
+    // listed as "would delete" is the clearest possible explanation of the
+    // hazard. Only the destructive half is refused, and the workaround needs no
+    // new flag: unset $SECRETCTL_HOME and prune from the vault that owns the
+    // items.
+    const default_home = paths_mod.isDefaultHome(p.home);
+    if (yes and !default_home) {
+        const code = fail(.unsafe_prune, "$SECRETCTL_HOME is not the default vault");
+        tty.writeStderr(
+            "  `stale` is computed against the vault at $SECRETCTL_HOME, so from here it\n" ++
+            "  also describes the real vault's live keychain item — deleting that does not\n" ++
+            "  self-heal.\n" ++
+            "  Re-run without --yes to see what it would touch, or unset $SECRETCTL_HOME\n" ++
+            "  and prune from the vault that owns the items.\n");
+        return code;
+    }
+
     const accounts = keychain_mod.listAccounts(allocator) catch return errExit("keychain enumeration failed");
     defer {
         for (accounts) |a| allocator.free(a);
@@ -2360,6 +2387,11 @@ fn runPruneKeychain(allocator: std.mem.Allocator, args: []const []const u8) u8 {
             tty.writeStdout(acct);
             tty.writeStdout("\n");
         }
+    }
+
+    if (!default_home) {
+        tty.writeStderr("\nnote: $SECRETCTL_HOME is not the default vault, so anything listed above\n" ++
+            "may belong to a vault that is perfectly healthy. --yes is refused from here.\n");
     }
 
     if (stale == 0) {
@@ -2413,6 +2445,7 @@ pub const Fail = enum {
     bad_code,
     code_already_used,
     sync_diverged,
+    unsafe_prune,
     internal_error,
 
     fn name(self: Fail) []const u8 {
@@ -2432,6 +2465,7 @@ pub const Fail = enum {
             .bad_code => "bad-code",
             .code_already_used => "code-already-used",
             .sync_diverged => "sync-diverged",
+            .unsafe_prune => "unsafe-prune",
             .internal_error => "internal-error",
         };
     }

@@ -113,6 +113,7 @@ drifts out of sync with the binary:
 ```bash
 secretctl reinstall-keychain     # rebuild the protector for the current binary
 secretctl prune-keychain         # list stale items from old vaults; --yes to delete
+                                 # (--yes refuses unless $SECRETCTL_HOME is the default vault)
 ```
 
 A re-signed binary invalidates the trusted-app ACL, so an upgrade can
