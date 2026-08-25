@@ -3,7 +3,9 @@ name: CI
 on:
   push:
     branches: [main]
+    paths-ignore: ["**.md"]
   pull_request:
+    paths-ignore: ["**.md"]
 
 jobs:
   test:
@@ -32,13 +34,9 @@ jobs:
       # than a missing one. No keychain items, no network.
       - name: e2e (skill)
         run: bash tests/e2e_skill.sh
-
-  nix-build:
-    name: nix build
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: DeterminateSystems/nix-installer-action@main
-      - uses: DeterminateSystems/magic-nix-cache-action@main
-      - run: nix build .#secretctl
-      - run: ./result/bin/secretctl --version
+      # The three version strings must agree. This is what the old `nix build`
+      # job incidentally covered — and the only part of it worth keeping, since
+      # nothing consumes the nix package. Costs a second instead of five
+      # minutes, and catches a mismatch, which `nix build` never did.
+      - name: version strings agree
+        run: bash tests/version_consistency.sh

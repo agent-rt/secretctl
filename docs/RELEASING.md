@@ -28,6 +28,18 @@ Three places, and they must agree:
 beginning and nothing consumes it. Leave it alone; changing it would imply it
 means something.
 
+`tests/version_consistency.sh` checks the three agree, and runs in CI. It
+replaced a `nix build` job that compiled the flake's package on every PR:
+nothing consumes that package — the Home Manager module is the part that gets
+used, and it overrides `programs.secretctl.package` with a wrapper around the
+Homebrew binary precisely to avoid building Zig under Nix. Five minutes to
+build something nobody installs, and it never compared the versions anyway.
+
+The cost of dropping it: a syntax error in `flake.nix` now surfaces at the next
+`nix flake update` in the consuming config rather than in CI. That is a fair
+trade for a file touched once per release, and a version *mismatch* — the
+likelier mistake — is now caught, which it never was.
+
 ## Choosing the number
 
 Pre-1.0, so the middle number carries everything user-visible:
