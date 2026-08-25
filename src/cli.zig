@@ -68,7 +68,7 @@ pub const usage_text =
     \\  secretctl reinstall-keychain [--no-touch-id]   # rebuild keychain protector
     \\  secretctl prune-keychain [--yes]     # remove stale secretctl keychain items from old vaults
     \\  secretctl agent [run|status|stop]    # cache the unlocked key to skip repeat Touch ID
-    \\  secretctl 2fa [enroll|status|test|disable]  # TOTP code when the screen is locked
+    \\  secretctl 2fa [enroll|auth|revoke|status|test|disable]  # TOTP when locked
     \\
     \\ENV:
     \\  $VISUAL / $EDITOR control which editor `edit` and `add --editor` launch.
@@ -349,7 +349,17 @@ fn unlockSession(
                 return null;
             },
         }
-        if (!requestTotpApproval(allocator, p.home, &totp_mk_id, authz_decision.reason)) return null;
+        // An open window stands in for a code. Recorded distinctly from an
+        // approval, because otherwise the audit trail cannot tell an unlock a
+        // human authorized from one the window served — the same reason cache
+        // hits are logged as `unlock.cached`.
+        if (totpWindowRemaining(allocator, p.home)) |left| {
+            var lbuf: [64]u8 = undefined;
+            const ls = std.fmt.bufPrint(&lbuf, "{d}", .{left}) catch "?";
+            audit_mod.log("authz.window_used", .cli, &.{audit_mod.s("seconds_left", ls)});
+        } else {
+            if (!requestTotpApproval(allocator, p.home, &totp_mk_id, authz_decision.reason)) return null;
+        }
         // Approved. Fall through to the normal unlock: approval authorises the
         // operation, it does not hand over the key. The keychain protector
         // still has to produce it, so a stolen approval on its own is worth
@@ -1494,6 +1504,47 @@ const totp_unreadable_hint =
     "from a terminal first, which re-establishes the keychain protector.\n" ++
     "If the seed is genuinely lost, `secretctl 2fa disable` then re-enroll.\n";
 
+/// How long one verified code authorizes for.
+///
+/// 120 s: long enough for a run of commands, short enough that walking away
+/// does not leave the vault open. This is the window `authz.decide()` sitting
+/// above the key cache exists to prevent, reopened deliberately — see
+/// `docs/2fa-design.md` §1.4.2 for the measurement that motivated it.
+const totp_window_s: i64 = 120;
+
+fn totpWindowPath(allocator: std.mem.Allocator, home: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{s}/totp.window", .{home});
+}
+
+/// Seconds left on the authorization window, or null when it is closed.
+///
+/// The file holds an absolute deadline, not a duration. A duration would be
+/// re-armed by every read and survive a suspend; a deadline expires while the
+/// machine sleeps, which is the behaviour someone who walked away expects.
+fn totpWindowRemaining(allocator: std.mem.Allocator, home: []const u8) ?i64 {
+    const path = totpWindowPath(allocator, home) catch return null;
+    defer allocator.free(path);
+    const raw = fsx.readAllAlloc(allocator, path, 64) catch return null;
+    defer allocator.free(raw);
+    const deadline = std.fmt.parseInt(i64, std.mem.trim(u8, raw, " \t\r\n"), 10) catch return null;
+    const left = deadline - clock_mod.unixSeconds();
+    return if (left > 0) left else null;
+}
+
+fn totpOpenWindow(allocator: std.mem.Allocator, home: []const u8) void {
+    const path = totpWindowPath(allocator, home) catch return;
+    defer allocator.free(path);
+    var buf: [32]u8 = undefined;
+    const text = std.fmt.bufPrint(&buf, "{d}\n", .{clock_mod.unixSeconds() + totp_window_s}) catch return;
+    fsx.writeAllAtomic(path, text, 0o600) catch {};
+}
+
+fn totpCloseWindow(allocator: std.mem.Allocator, home: []const u8) void {
+    const path = totpWindowPath(allocator, home) catch return;
+    defer allocator.free(path);
+    fsx.unlinkIfExists(path);
+}
+
 /// Path of the replay ledger. Not secret — it holds one integer — but 0600
 /// because everything in the vault directory is.
 fn totpStatePath(allocator: std.mem.Allocator, home: []const u8) ![]u8 {
@@ -1589,7 +1640,7 @@ fn requestTotpApproval(
 
 fn runTwoFactor(allocator: std.mem.Allocator, args: []const []const u8) u8 {
     if (args.len == 0) {
-        tty.writeStderr("usage: secretctl 2fa [enroll|status|test|disable]\n");
+        tty.writeStderr("usage: secretctl 2fa [enroll|auth|revoke|status|test|disable]\n");
         return 2;
     }
     var p = paths_mod.resolve(allocator) catch return errExit("cannot resolve paths");
@@ -1674,6 +1725,13 @@ fn runTwoFactor(allocator: std.mem.Allocator, args: []const []const u8) u8 {
             },
         }
         tty.writeStdout("TOTP: enrolled (SHA1, 6 digits, 30s)\n");
+        if (totpWindowRemaining(allocator, p.home)) |left| {
+            var wbuf: [80]u8 = undefined;
+            const wl = std.fmt.bufPrint(&wbuf, "authorization window OPEN, {d}s left\n", .{left}) catch "\n";
+            tty.writeStdout(wl);
+        } else {
+            tty.writeStdout("authorization window closed\n");
+        }
         if (totpLastStep(allocator, p.home)) |st| {
             var buf: [64]u8 = undefined;
             const line = std.fmt.bufPrint(&buf, "last code spent at step {d}\n", .{st}) catch "\n";
@@ -1701,11 +1759,75 @@ fn runTwoFactor(allocator: std.mem.Allocator, args: []const []const u8) u8 {
         return if (requestTotpApproval(allocator, p.home, &mk_id, "2fa test, no secret involved")) 0 else 1;
     }
 
+    if (std.mem.eql(u8, args[0], "auth")) {
+        switch (totpState(&mk_id)) {
+            .enrolled => {},
+            .not_enrolled => {
+                tty.writeStderr(authz.not_configured_hint);
+                return 1;
+            },
+            .unreadable => {
+                tty.writeStderr(totp_unreadable_hint);
+                return 1;
+            },
+        }
+        // The code may come positionally. Unlike the master passphrase and the
+        // enrolment token, which this project deliberately keeps off argv, a
+        // TOTP code is single-use, expires in 30 s, and is spent by the command
+        // that carries it — and in the flow this exists for it has already
+        // travelled through a chat window. `ps` is not the weak link here.
+        // Without an argument it falls back to the fd/terminal path.
+        const supplied: ?[]const u8 = if (args.len > 1) args[1] else null;
+        const okd = if (supplied) |code| blk: {
+            const seed = keychain_mod.fetchTotpSeed(allocator, &mk_id) catch {
+                tty.writeStderr("cannot read the TOTP seed from the keychain\n");
+                return 1;
+            };
+            defer {
+                mem_util.secureZero(u8, seed);
+                allocator.free(seed);
+            }
+            const trimmed = std.mem.trim(u8, code, " \t\r\n");
+            const m = totp.verifyNow(seed, trimmed, totpLastStep(allocator, p.home)) catch |e| {
+                switch (e) {
+                    totp.Error.Replayed => tty.writeStderr("that code was already used. Wait for the next one (up to 30s).\n"),
+                    totp.Error.Malformed => tty.writeStderr("expected exactly six digits\n"),
+                    else => tty.writeStderr("incorrect code\n"),
+                }
+                audit_mod.log("authz.denied", .cli, &.{audit_mod.s("method", "totp")});
+                break :blk false;
+            };
+            totpRecordStep(allocator, p.home, m.step);
+            break :blk true;
+        } else requestTotpApproval(allocator, p.home, &mk_id, "open an authorization window");
+        if (!okd) return 1;
+
+        totpOpenWindow(allocator, p.home);
+        audit_mod.log("authz.window_opened", .cli, &.{audit_mod.n("seconds", totp_window_s)});
+        var buf: [96]u8 = undefined;
+        const line = std.fmt.bufPrint(
+            &buf,
+            "authorized for {d}s. `secretctl 2fa revoke` closes it early.\n",
+            .{totp_window_s},
+        ) catch "authorized\n";
+        tty.writeStderr(line);
+        return 0;
+    }
+
+    if (std.mem.eql(u8, args[0], "revoke")) {
+        totpCloseWindow(allocator, p.home);
+        audit_mod.log("authz.window_closed", .cli, &.{});
+        tty.writeStderr("authorization window closed.\n");
+        return 0;
+    }
+
     if (std.mem.eql(u8, args[0], "disable")) {
         keychain_mod.deleteTotpSeed(&mk_id) catch {};
         const path = totpStatePath(allocator, p.home) catch return errExit("out of memory");
         defer allocator.free(path);
         fsx.unlinkIfExists(path);
+        // An open window would outlive the seed that authorized it.
+        totpCloseWindow(allocator, p.home);
         tty.writeStdout("TOTP disabled. A locked screen will now refuse instead of asking.\n");
         audit_mod.log("2fa.disable", .cli, &.{audit_mod.s("method", "totp")});
         return 0;
