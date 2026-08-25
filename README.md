@@ -208,7 +208,7 @@ specifies a real second factor and records why it is not being built.
 
 ## Status
 
-v0.8.1. macOS arm64 only. Shipped: vault + CLI, Touch ID–gated unlock,
+v0.8.2. macOS arm64 only. Shipped: vault + CLI, Touch ID–gated unlock,
 `materialize` + Home Manager module, cross-Mac vault sync over git, and
 offline TOTP approval when the screen is locked. See `tests/e2e.sh`,
 `tests/e2e_sync.sh`, and `tests/e2e_lockstate.sh` for the behavior
