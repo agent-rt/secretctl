@@ -154,6 +154,33 @@ from "that one is gone, wait 30s". This matters because the code travels
 through whatever channel you used to hand it over — a chat window, a
 terminal someone can scroll back through.
 
+### One code per command, while locked
+
+The key cache does **not** shorten this. Measured, with the cache warm:
+
+```
+give a code            -> unlocks
+same command, no code  -> refused: screen is locked
+same code again        -> refused: already used
+next code              -> unlocks
+```
+
+The authorization check runs *above* the cache deliberately — otherwise
+locking the screen would leave a 120s window needing no approval at all,
+which is the hole the check exists to close. Combined with single-use
+codes, that means **every command run while locked needs its own fresh
+code**, and codes roll every 30s.
+
+For the usual case — an agent needs one secret, you hand over one code —
+this is fine. For a sequence of commands it is not: you would be feeding
+codes one at a time with a wait between each. Do the work in a single
+`secretctl exec` instead; that is what it is for, and it costs one code.
+
+This is a deliberate trade, not a defect to be worked around silently. If
+it turns out to obstruct real use, the fix is a short grace window after a
+verified code — which would reintroduce exactly the unauthorized window
+described above, so it wants evidence first.
+
 Set `SECRETCTL_FORCE_LOCKED=0` or `=1` to pin the lock state — needed by
 every test suite, since otherwise the result depends on whether someone
 happens to be looking at the screen.

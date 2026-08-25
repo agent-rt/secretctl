@@ -196,6 +196,37 @@ Cached unlocks are now logged as `unlock.cached`. Before this the audit trail
 could not distinguish an unlock a human authorised from one served for free,
 which is what `2of2-protector.md` §9 Q4 asked for.
 
+### 1.4.2 Measured: the gate's position costs one code per command
+
+The corollary of putting `authz.decide()` above the cache, measured on a
+throwaway vault with `$SECRETCTL_AGENT=1` and the cache already warm:
+
+| step | result |
+|---|---|
+| locked, give a code | unlocks |
+| locked, same command, no code | refused — "screen is locked" |
+| locked, same code again | refused — "already used" |
+| locked, next code | unlocks |
+
+So a warm cache does not shorten the locked path at all, and because codes are
+single-use, **every command run while locked needs its own fresh code**, with a
+wait of up to 30 s between them.
+
+Both halves are load-bearing and neither is the thing to relax casually. The
+gate sits above the cache so that locking the screen leaves no unauthorized
+window (§1.4); codes are single-use so that reading them out of a chat
+transcript within their step is not enough (`totp.zig`). The cost falls out of
+having both.
+
+The mitigation that needs no code change is to do the work in one
+`secretctl exec` rather than a sequence of commands — one invocation, one code.
+
+If that proves insufficient in real use, the candidate fix is a short grace
+window after a verified code, during which the locked path may use the cache.
+That reintroduces precisely the unauthorized window this section exists to
+document, so it should be driven by evidence that the current behaviour
+obstructs something, not by anticipation.
+
 ---
 
 ## 2. What the current security model actually is
