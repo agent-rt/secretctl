@@ -400,6 +400,48 @@ pub fn accountFor(master_key_id: *const [16]u8, out: *[32]u8) void {
     hexAccount(master_key_id, out);
 }
 
+// ---------------- TOTP seed ----------------
+
+/// Suffix distinguishing the TOTP seed's item from the wrap key's. Both live
+/// under the same service and therefore the same trusted-app ACL, which is the
+/// point: M5 measured that a foreign binary cannot read such an item, so it can
+/// neither take the wrap key nor mint codes.
+const totp_suffix = "-totp";
+pub const totp_account_len = 32 + totp_suffix.len;
+
+/// Account string for this vault's TOTP seed.
+///
+/// Derived from master_key_id like the wrap key's, so the two travel together:
+/// a vault's seed cannot be confused with another vault's, and
+/// `prune-keychain` can recognise it as belonging to the current vault rather
+/// than deleting it as debris. That guard is not optional — before it, pruning
+/// would have silently destroyed a 2FA enrolment.
+pub fn totpAccountFor(master_key_id: *const [16]u8, out: *[totp_account_len]u8) void {
+    var hex: [32]u8 = undefined;
+    hexAccount(master_key_id, &hex);
+    @memcpy(out[0..32], &hex);
+    @memcpy(out[32..], totp_suffix);
+}
+
+pub fn storeTotpSeed(master_key_id: *const [16]u8, seed: []const u8) Error!void {
+    var acct: [totp_account_len]u8 = undefined;
+    totpAccountFor(master_key_id, &acct);
+    try keychainStore(default_service, acct[0..], seed, .default);
+}
+
+/// Caller owns the returned slice and should secureZero it.
+pub fn fetchTotpSeed(allocator: std.mem.Allocator, master_key_id: *const [16]u8) Error![]u8 {
+    var acct: [totp_account_len]u8 = undefined;
+    totpAccountFor(master_key_id, &acct);
+    return keychainFetch(allocator, default_service, acct[0..]);
+}
+
+pub fn deleteTotpSeed(master_key_id: *const [16]u8) Error!void {
+    var acct: [totp_account_len]u8 = undefined;
+    totpAccountFor(master_key_id, &acct);
+    try keychainDelete(default_service, acct[0..]);
+}
+
 /// List the accounts of every `secretctl` generic-password item in the
 /// keychain. Caller owns the returned slice and each entry. Used to find
 /// stale wrap-key items left by past inits/upgrades.

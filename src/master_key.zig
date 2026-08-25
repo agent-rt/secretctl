@@ -120,10 +120,9 @@ pub fn parseAndUnlock(
     blob: []const u8,
     password: ?[]const u8,
     /// Whether a Touch-ID-gated keychain protector may be read without
-    /// prompting because approval already arrived from another device. Only
-    /// Only `cli.zig` sets this, and only after
-    /// `push_auth.requestApproval` returned an approving, signature-verified
-    /// verdict. See `keychain.Gate`.
+    /// prompting because approval already arrived out of band. Only `cli.zig`
+    /// sets this, and only after a TOTP code verified against the enrolled
+    /// seed. See `keychain.Gate`.
     gate: keychain_mod.Gate,
     out_master_key: *[aes.key_len]u8,
     /// Set to true if a keychain protector's item exists but its trusted-app

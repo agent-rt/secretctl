@@ -12,6 +12,7 @@ const argon2 = @import("argon2.zig");
 const aes = @import("aes_gcm.zig");
 const protector_mod = @import("protector.zig");
 const keychain_mod = @import("keychain.zig");
+const totp = @import("totp.zig");
 const master_key_mod = @import("master_key.zig");
 const vault_mod = @import("vault.zig");
 const edit_view = @import("edit_view.zig");
@@ -22,7 +23,6 @@ const editor_mod = @import("editor.zig");
 const envelope_mod = @import("envelope.zig");
 const local_auth = @import("local_auth.zig");
 const authz = @import("authz.zig");
-const push_auth = @import("push_auth.zig");
 const clock_mod = @import("clock.zig");
 const agent_mod = @import("agent.zig");
 extern "c" fn dup2(oldfd: c_int, newfd: c_int) c_int;
@@ -67,7 +67,7 @@ pub const usage_text =
     \\  secretctl reinstall-keychain [--no-touch-id]   # rebuild keychain protector
     \\  secretctl prune-keychain [--yes]     # remove stale secretctl keychain items from old vaults
     \\  secretctl agent [run|status|stop]    # cache the unlocked key to skip repeat Touch ID
-    \\  secretctl 2fa [enroll|status|test]    # approve from a phone when the screen is locked
+    \\  secretctl 2fa [enroll|status|test|disable]  # TOTP code when the screen is locked
     \\
     \\ENV:
     \\  $VISUAL / $EDITOR control which editor `edit` and `add --editor` launch.
@@ -77,6 +77,7 @@ pub const usage_text =
     \\  $SECRETCTL_FORCE_LOCKED=1 treats the screen as locked (0 as unlocked), which
     \\      is the only way to exercise the locked-screen authorization path without
     \\      actually locking the screen.
+    \\  $SECRETCTL_TOTP_FD=N reads the 6-digit code from fd N (never argv: ps is public).
     \\  $SECRETCTL_PASSPHRASE_FD=N reads the master passphrase from fd N instead of
     \\      the terminal, for automation:  secretctl list 3<<<"$PASSPHRASE"
     \\      Never from stdin: stdin carries secret values, and whether an unlock
@@ -95,7 +96,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) u8 {
         return 0;
     }
     if (std.mem.eql(u8, cmd, "--version")) {
-        tty.writeStdout("secretctl 0.7.0\n");
+        tty.writeStdout("secretctl 0.8.0\n");
         return 0;
     }
 
@@ -316,10 +317,19 @@ fn unlockSession(
     // approval at all.
     const authz_decision = authz.decide();
     // Stays `.require_biometric` unless approval actually arrives, so every
-    // path that does not go through requestPhoneApproval keeps today's gate.
+    // path that does not go through requestTotpApproval keeps today's gate.
     var gate: keychain_mod.Gate = .require_biometric;
     if (authz_decision.method == .out_of_band) {
-        if (!authz.outOfBandConfigured(p.home)) {
+        // master_key_id sits in plaintext at offset 10 of the header, so the
+        // TOTP seed can be located without unlocking anything first.
+        if (blob.len < 26) {
+            tty.writeStderr("master.key too short\n");
+            return null;
+        }
+        var totp_mk_id: [16]u8 = undefined;
+        @memcpy(&totp_mk_id, blob[10..26]);
+
+        if (!totpEnrolled(&totp_mk_id)) {
             // Fail closed, and say which of the two things is missing: nobody
             // is at the machine, and there is no way to ask them.
             tty.writeStderr("cannot authorize: ");
@@ -328,7 +338,7 @@ fn unlockSession(
             tty.writeStderr(authz.not_configured_hint);
             return null;
         }
-        if (!requestPhoneApproval(allocator, p.home, authz_decision.reason)) return null;
+        if (!requestTotpApproval(allocator, p.home, &totp_mk_id, authz_decision.reason)) return null;
         // Approved. Fall through to the normal unlock: approval authorises the
         // operation, it does not hand over the key. The keychain protector
         // still has to produce it, so a stolen approval on its own is worth
@@ -1422,152 +1432,192 @@ fn runReveal(allocator: std.mem.Allocator, args: []const []const u8) u8 {
     return 0;
 }
 
-// ------- 2fa (out-of-band approval) -------
+// ------- 2fa (offline TOTP approval) -------
 
-/// Ask a paired phone to approve this unlock. Returns true only on a verdict
-/// whose signature verified against a pinned key.
+/// True when this vault has a TOTP seed enrolled.
 ///
-/// Every failure path returns false. There is deliberately no branch that
-/// treats an error as approval: a network problem, a forged signature and a
-/// timeout are all "no".
-fn requestPhoneApproval(
+/// Presence of the keychain item is the signal. Reading it needs the ACL, so a
+/// foreign binary cannot even answer this question (M5) — which is fine: it has
+/// no reason to.
+fn totpEnrolled(master_key_id: *const [16]u8) bool {
+    const seed = keychain_mod.fetchTotpSeed(std.heap.page_allocator, master_key_id) catch return false;
+    defer {
+        mem_util.secureZero(u8, seed);
+        std.heap.page_allocator.free(seed);
+    }
+    return seed.len >= 16;
+}
+
+/// Path of the replay ledger. Not secret — it holds one integer — but 0600
+/// because everything in the vault directory is.
+fn totpStatePath(allocator: std.mem.Allocator, home: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{s}/totp.state", .{home});
+}
+
+/// The most recently spent time step, if any.
+///
+/// A missing or unparseable file reads as "nothing spent" rather than as an
+/// error: the ledger is a replay guard, and failing closed on a corrupt one
+/// would lock the operator out of their own vault over a file that carries no
+/// secret. The cost of failing open is that a code can be reused once within
+/// its own 30 s window — bounded, and strictly better than an unopenable vault.
+fn totpLastStep(allocator: std.mem.Allocator, home: []const u8) ?u64 {
+    const path = totpStatePath(allocator, home) catch return null;
+    defer allocator.free(path);
+    const raw = fsx.readAllAlloc(allocator, path, 64) catch return null;
+    defer allocator.free(raw);
+    const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+    return std.fmt.parseInt(u64, trimmed, 10) catch null;
+}
+
+fn totpRecordStep(allocator: std.mem.Allocator, home: []const u8, step: u64) void {
+    const path = totpStatePath(allocator, home) catch return;
+    defer allocator.free(path);
+    var buf: [32]u8 = undefined;
+    const text = std.fmt.bufPrint(&buf, "{d}\n", .{step}) catch return;
+    fsx.writeAllAtomic(path, text, 0o600) catch {};
+}
+
+/// Ask for a TOTP code and verify it. Returns true only on a fresh, unspent
+/// code.
+///
+/// The code comes from `$SECRETCTL_TOTP_FD` when set, otherwise from the
+/// terminal. **Never from argv** — `ps` is world-readable, and this project has
+/// already had to move the master passphrase and an enrolment token off it for
+/// exactly that reason.
+fn requestTotpApproval(
     allocator: std.mem.Allocator,
     home: []const u8,
+    master_key_id: *const [16]u8,
     reason: []const u8,
 ) bool {
-    return push_auth.approveOrExplain(
-        allocator,
-        home,
-        "secretctl · unlock vault",
-        reason,
-    );
+    const seed = keychain_mod.fetchTotpSeed(allocator, master_key_id) catch {
+        tty.writeStderr("cannot read the TOTP seed from the keychain; run `secretctl 2fa enroll`\n");
+        return false;
+    };
+    defer {
+        mem_util.secureZero(u8, seed);
+        allocator.free(seed);
+    }
+
+    tty.writeStderr("authorization required: ");
+    tty.writeStderr(reason);
+    tty.writeStderr("\n");
+
+    var code = tty.readFromFdEnv(allocator, "SECRETCTL_TOTP_FD") catch blk: {
+        // No dedicated channel. A terminal is the other legitimate source; an
+        // unattended run has neither and must fail rather than hang.
+        const pw = tty.readPassword(allocator, "6-digit code: ") catch {
+            tty.writeStderr("no code supplied. Pass it on a dedicated fd, e.g.\n" ++
+                "  SECRETCTL_TOTP_FD=3 secretctl ... 3<<<\"123456\"\n");
+            return false;
+        };
+        break :blk pw;
+    };
+    defer code.deinit();
+
+    const trimmed = std.mem.trim(u8, code.bytes, " \t\r\n");
+    const last = totpLastStep(allocator, home);
+    const m = totp.verifyNow(seed, trimmed, last) catch |e| {
+        switch (e) {
+            totp.Error.Replayed => tty.writeStderr(
+                "that code was already used. Wait for the next one (up to 30s).\n"),
+            totp.Error.Malformed => tty.writeStderr("expected exactly six digits\n"),
+            else => tty.writeStderr("incorrect code\n"),
+        }
+        audit_mod.log("authz.denied", .cli, &.{audit_mod.s("method", "totp")});
+        return false;
+    };
+
+    // Spend it before returning. If this write fails the code stays reusable
+    // for the rest of its step — logged rather than fatal, for the same reason
+    // a corrupt ledger reads as empty.
+    totpRecordStep(allocator, home, m.step);
+    audit_mod.log("authz.approved", .cli, &.{audit_mod.s("method", "totp")});
+    tty.writeStdout("authorized\n");
+    return true;
 }
 
 fn runTwoFactor(allocator: std.mem.Allocator, args: []const []const u8) u8 {
     if (args.len == 0) {
-        tty.writeStderr("usage: secretctl 2fa [enroll|status|test]\n");
+        tty.writeStderr("usage: secretctl 2fa [enroll|status|test|disable]\n");
         return 2;
     }
     var p = paths_mod.resolve(allocator) catch return errExit("cannot resolve paths");
     defer p.deinit();
+    if (!fsx.fileExists(p.master_key)) {
+        tty.writeStderr("no vault found; run `secretctl init` first\n");
+        return 1;
+    }
+    const blob = fsx.readAllAlloc(allocator, p.master_key, 1 * 1024 * 1024) catch
+        return errExit("read master.key failed");
+    defer allocator.free(blob);
+    if (blob.len < 26) return errExit("master.key too short");
+    var mk_id: [16]u8 = undefined;
+    @memcpy(&mk_id, blob[10..26]);
 
-    if (std.mem.eql(u8, args[0], "status")) {
-        var cfg = push_auth.load(allocator, p.home) catch {
-            tty.writeStdout("out-of-band approval: not configured\n");
-            tty.writeStdout(authz.not_configured_hint);
-            return 1;
-        };
-        defer cfg.deinit();
-
-        tty.writeStdout("worker:  ");
-        tty.writeStdout(cfg.worker_url);
-        tty.writeStdout("\nclient:  ");
-        tty.writeStdout(cfg.client_id);
-        tty.writeStdout("\n");
-
-        // Refresh so a device paired since last time gets pinned, and so a
-        // substituted key is caught here rather than mid-unlock.
-        const r = push_auth.refreshDevices(allocator, p.home, &cfg) catch |e| {
-            if (e == push_auth.Error.KeySubstituted) {
-                tty.writeStderr(
-                    "\nREFUSING: a pinned device's key changed.\n" ++
-                    "Keys do not change in place, so this is a substitution, not an update.\n");
-                return 1;
-            }
-            tty.writeStderr("could not reach the service: ");
-            tty.writeStderr(@errorName(e));
-            tty.writeStderr("\n");
-            return 1;
-        };
-        if (!r.paired) {
-            tty.writeStdout("devices: none paired yet\n");
+    if (std.mem.eql(u8, args[0], "enroll")) {
+        if (totpEnrolled(&mk_id)) {
+            tty.writeStderr("already enrolled. `secretctl 2fa disable` first if you want a new seed —\n" ++
+                "re-enrolling invalidates whatever your authenticator currently holds.\n");
             return 1;
         }
-        tty.writeStdout("devices:\n");
-        for (cfg.devices) |d| {
-            tty.writeStdout("  ");
-            tty.writeStdout(d.fingerprint);
-            tty.writeStdout("  ");
-            tty.writeStdout(d.label);
-            tty.writeStdout("\n");
+        var seed: [totp.seed_len]u8 = undefined;
+        rand.bytes(&seed);
+        defer mem_util.secureZero(u8, &seed);
+
+        keychain_mod.storeTotpSeed(&mk_id, &seed) catch {
+            tty.writeStderr("could not store the seed in the keychain\n");
+            return 1;
+        };
+
+        const uri = totp.otpauthUri(allocator, &seed, "vault") catch return errExit("out of memory");
+        defer {
+            mem_util.secureZero(u8, uri);
+            allocator.free(uri);
         }
-        tty.writeStdout("\nCompare each fingerprint against what that phone shows.\n");
+        tty.writeStdout("Add this to your authenticator app:\n\n  ");
+        tty.writeStdout(uri);
+        tty.writeStdout("\n\nThen confirm it round-trips before relying on it:\n");
+        tty.writeStdout("  SECRETCTL_TOTP_FD=3 secretctl 2fa test 3<<<\"123456\"\n");
+        audit_mod.log("2fa.enroll", .cli, &.{audit_mod.s("method", "totp")});
         return 0;
     }
 
-    if (std.mem.eql(u8, args[0], "enroll")) {
-        // The enrolment token comes from whoever administers the service. It is
-        // read from a dedicated fd rather than argv, for the same reason the
-        // master passphrase is: argv is world-readable via ps.
-        var worker: []const u8 = "";
-        var app_id: []const u8 = "";
-        var label: []const u8 = "mac";
-        var i: usize = 1;
-        while (i < args.len) : (i += 1) {
-            if (std.mem.eql(u8, args[i], "--worker") and i + 1 < args.len) {
-                i += 1;
-                worker = args[i];
-            } else if (std.mem.eql(u8, args[i], "--app-id") and i + 1 < args.len) {
-                i += 1;
-                app_id = args[i];
-            } else if (std.mem.eql(u8, args[i], "--label") and i + 1 < args.len) {
-                i += 1;
-                label = args[i];
-            } else {
-                tty.writeStderr("usage: secretctl 2fa enroll --worker URL --app-id ID [--label NAME]\n");
-                tty.writeStderr("  the enrolment token is read from $SECRETCTL_ENROL_FD\n");
-                return 2;
-            }
-        }
-        if (worker.len == 0 or app_id.len == 0) {
-            tty.writeStderr("usage: secretctl 2fa enroll --worker URL --app-id ID [--label NAME]\n");
-            return 2;
-        }
-        var token = tty.readFromFdEnv(allocator, "SECRETCTL_ENROL_FD") catch {
-            tty.writeStderr("enrolment token must be supplied on a dedicated fd, e.g.\n" ++
-                "  SECRETCTL_ENROL_FD=3 secretctl 2fa enroll --worker … --app-id … 3<<<\"$TOKEN\"\n");
-            return 2;
-        };
-        defer token.deinit();
-
-        const e = push_auth.enroll(allocator, p.home, worker, app_id, token.bytes, label) catch |err| {
-            tty.writeStderr("enrolment failed: ");
-            tty.writeStderr(@errorName(err));
-            tty.writeStderr("\n");
+    if (std.mem.eql(u8, args[0], "status")) {
+        if (!totpEnrolled(&mk_id)) {
+            tty.writeStdout("TOTP: not enrolled\n");
+            tty.writeStdout(authz.not_configured_hint);
             return 1;
-        };
-        tty.writeStdout("enrolled. Open the PWA and enter this pairing code:\n\n    ");
-        tty.writeStdout(e.code());
-        tty.writeStdout("\n\nThen run `secretctl 2fa status` and compare the fingerprint it prints\n");
-        tty.writeStdout("against the one shown on the phone. If they differ, something\n");
-        tty.writeStdout("substituted a key — do not approve anything.\n");
+        }
+        tty.writeStdout("TOTP: enrolled (SHA1, 6 digits, 30s)\n");
+        if (totpLastStep(allocator, p.home)) |st| {
+            var buf: [64]u8 = undefined;
+            const line = std.fmt.bufPrint(&buf, "last code spent at step {d}\n", .{st}) catch "\n";
+            tty.writeStdout(line);
+        } else {
+            tty.writeStdout("no code spent yet\n");
+        }
         return 0;
     }
 
     if (std.mem.eql(u8, args[0], "test")) {
-        // A full round trip that touches no secret, so the path can be checked
-        // without putting a real unlock behind it.
-        var cfg = push_auth.load(allocator, p.home) catch {
+        // A full verification that unlocks nothing, so the channel can be
+        // checked without putting a real secret behind it.
+        if (!totpEnrolled(&mk_id)) {
             tty.writeStderr(authz.not_configured_hint);
             return 1;
-        };
-        defer cfg.deinit();
-        const purpose = push_auth.buildPurpose(allocator, "secretctl · test",
-            "approval test, no secret involved", &.{
-                .{ "command", "secretctl 2fa test" },
-            }, false) catch return errExit("out of memory");
-        defer allocator.free(purpose);
+        }
+        return if (requestTotpApproval(allocator, p.home, &mk_id, "2fa test, no secret involved")) 0 else 1;
+    }
 
-        tty.writeStderr("waiting for approval on your phone…\n");
-        const v = push_auth.requestApproval(allocator, &cfg, purpose) catch |e| {
-            tty.writeStderr("test failed: ");
-            tty.writeStderr(@errorName(e));
-            tty.writeStderr("\n");
-            return 1;
-        };
-        tty.writeStdout("approved by ");
-        tty.writeStdout(v.device_fingerprint);
-        tty.writeStdout("\n");
+    if (std.mem.eql(u8, args[0], "disable")) {
+        keychain_mod.deleteTotpSeed(&mk_id) catch {};
+        const path = totpStatePath(allocator, p.home) catch return errExit("out of memory");
+        defer allocator.free(path);
+        fsx.unlinkIfExists(path);
+        tty.writeStdout("TOTP disabled. A locked screen will now refuse instead of asking.\n");
+        audit_mod.log("2fa.disable", .cli, &.{audit_mod.s("method", "totp")});
         return 0;
     }
 
@@ -1972,6 +2022,13 @@ fn runPruneKeychain(allocator: std.mem.Allocator, args: []const []const u8) u8 {
     var keep_buf: [32]u8 = undefined;
     keychain_mod.accountFor(&mk_id, &keep_buf);
     const keep = keep_buf[0..];
+    // The current vault owns a second item: its TOTP seed. Without this, prune
+    // would classify it as debris and silently destroy the 2FA enrolment —
+    // which is exactly the failure mode `2fa-design.md` §5 item 6 recorded as
+    // a guard that had to land before anything else depended on the keychain.
+    var keep_totp_buf: [keychain_mod.totp_account_len]u8 = undefined;
+    keychain_mod.totpAccountFor(&mk_id, &keep_totp_buf);
+    const keep_totp = keep_totp_buf[0..];
 
     const accounts = keychain_mod.listAccounts(allocator) catch return errExit("keychain enumeration failed");
     defer {
@@ -1982,6 +2039,7 @@ fn runPruneKeychain(allocator: std.mem.Allocator, args: []const []const u8) u8 {
     var stale: usize = 0;
     for (accounts) |acct| {
         if (std.mem.eql(u8, acct, keep)) continue;
+        if (std.mem.eql(u8, acct, keep_totp)) continue;
         stale += 1;
         if (yes) {
             keychain_mod.deleteAccount(acct) catch {
@@ -2001,7 +2059,7 @@ fn runPruneKeychain(allocator: std.mem.Allocator, args: []const []const u8) u8 {
     }
 
     if (stale == 0) {
-        tty.writeStdout("no stale secretctl keychain items (keeping current vault).\n");
+        tty.writeStdout("no stale secretctl keychain items (keeping this vault's wrap key and TOTP seed).\n");
         return 0;
     }
     if (yes) {

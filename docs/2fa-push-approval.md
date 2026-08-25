@@ -9,6 +9,17 @@ authorization out of band, via a Cloudflare Workers relay, a PWA, and Web
 Push on iOS and Android. Both authorization methods are supported: **Touch ID
 when someone is at the machine, push 2FA when the screen is locked.**
 
+> **Superseded in v0.8.0.** The push/relay approval this specifies was built,
+> verified, and then removed: the requirement it answered was a misreading — the
+> ask was for something purely offline. It is replaced by RFC 6238 TOTP
+> (`src/totp.zig`), which reaches the same security category (a consent gate,
+> not a factor) with no service to run and nothing to reach over the network.
+>
+> Kept because the measurements in it are still the record — §2.2b (a
+> Touch-ID-gated protector cannot unlock while locked, 13 s), §2.2c (why a
+> verified approval may stand in for that gate), and §2.3 (pin the lock state in
+> tests) all still describe how the code behaves. Only the transport changed.
+
 > **MCP was removed in v0.7.0.** This document predates that and refers to
 > `secretctl mcp`, `mcp_tools.zig`, `get_secret` and `run_with_secrets`
 > throughout. Those references are left as written: they are the record of what
